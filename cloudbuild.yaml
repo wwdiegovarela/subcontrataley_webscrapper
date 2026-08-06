@@ -1,0 +1,162 @@
+# Cloud Build: construir imagen y desplegar Cloud Run Jobs de Subcontrataley.
+# Misma forma que cargas_documentos_instalaciones_webscrapper/cloudbuild.yaml:
+#   1 imagen → N jobs (mismo --image, distinto --args=*_cloudrun.py)
+#
+# - En UPDATE: --update-env-vars (no pisa passwords/tokens ya configurados).
+# - En CREATE: --set-env-vars con _ENV_BASE.
+#
+#   gcloud builds submit --config=cloudbuild.yaml .
+#   gcloud run jobs execute subcontrataley-libro-asistencia --region=us-east1
+#   gcloud run jobs execute subcontrataley-ingreso-trabajadores --region=us-east1
+
+substitutions:
+  _REGION: us-east1
+  _IMAGE: gcr.io/worldwide-470917/subcontrataley-webscrapper
+  _SA: webscrapper@worldwide-470917.iam.gserviceaccount.com
+  _ENV_BASE: >-
+    GCS_BUCKET_NAME=worldwide-documentos-instalaciones,HEADLESS=true,IMPLICIT_WAIT=10,EXPLICIT_WAIT=40,INGRESO_CARGA_TIMEOUT=600
+
+steps:
+  # Paso 1: Construir la imagen Docker
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - ${_IMAGE}:${SHORT_SHA}
+      - -t
+      - ${_IMAGE}:latest
+      - .
+
+  # Paso 2: Push
+  - name: gcr.io/cloud-builders/docker
+    id: push-sha
+    args: [push, ${_IMAGE}:${SHORT_SHA}]
+
+  - name: gcr.io/cloud-builders/docker
+    id: push-latest
+    args: [push, ${_IMAGE}:latest]
+
+  # Paso 3: Job Libro de Asistencia
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set +e
+        JOB="subcontrataley-libro-asistencia"
+        REGION="${_REGION}"
+        IMAGE="${_IMAGE}:${SHORT_SHA}"
+        ENV_VARS="${_ENV_BASE}"
+        SA="${_SA}"
+        ARGS="libro_asistencia_cloudrun.py"
+
+        gcloud run jobs describe "$${JOB}" --region "$${REGION}" >/dev/null 2>&1
+        JOB_EXISTS=$$?
+
+        if [ $${JOB_EXISTS} -eq 0 ]; then
+          echo "✅ Job existe: actualizando $${JOB} (solo imagen/args; env vars existentes no se reemplazan)"
+          gcloud run jobs update "$${JOB}" \
+            --image="$${IMAGE}" \
+            --region="$${REGION}" \
+            --update-env-vars="$${ENV_VARS}" \
+            --service-account="$${SA}" \
+            --task-timeout=3600 \
+            --memory=4Gi \
+            --cpu=2 \
+            --max-retries=1 \
+            --command=python \
+            --args="$${ARGS}"
+        else
+          echo "📝 Job no existe: creando $${JOB}"
+          gcloud run jobs create "$${JOB}" \
+            --image="$${IMAGE}" \
+            --region="$${REGION}" \
+            --set-env-vars="$${ENV_VARS}" \
+            --service-account="$${SA}" \
+            --task-timeout=3600 \
+            --memory=4Gi \
+            --cpu=2 \
+            --max-retries=1 \
+            --command=python \
+            --args="$${ARGS}" || {
+            echo "⚠️ Error creando job (puede que ya exista), intentando actualizar..."
+            gcloud run jobs update "$${JOB}" \
+              --image="$${IMAGE}" \
+              --region="$${REGION}" \
+              --update-env-vars="$${ENV_VARS}" \
+              --service-account="$${SA}" \
+              --task-timeout=3600 \
+              --memory=4Gi \
+              --cpu=2 \
+              --max-retries=1 \
+              --command=python \
+              --args="$${ARGS}"
+          }
+        fi
+    waitFor: [push-sha, push-latest]
+
+  # Paso 4: Job Ingreso de trabajadores
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set +e
+        JOB="subcontrataley-ingreso-trabajadores"
+        REGION="${_REGION}"
+        IMAGE="${_IMAGE}:${SHORT_SHA}"
+        ENV_VARS="${_ENV_BASE}"
+        SA="${_SA}"
+        ARGS="ingreso_trabajadores_cloudrun.py"
+
+        gcloud run jobs describe "$${JOB}" --region "$${REGION}" >/dev/null 2>&1
+        JOB_EXISTS=$$?
+
+        if [ $${JOB_EXISTS} -eq 0 ]; then
+          echo "✅ Job existe: actualizando $${JOB} (solo imagen/args; env vars existentes no se reemplazan)"
+          gcloud run jobs update "$${JOB}" \
+            --image="$${IMAGE}" \
+            --region="$${REGION}" \
+            --update-env-vars="$${ENV_VARS}" \
+            --service-account="$${SA}" \
+            --task-timeout=3600 \
+            --memory=4Gi \
+            --cpu=2 \
+            --max-retries=1 \
+            --command=python \
+            --args="$${ARGS}"
+        else
+          echo "📝 Job no existe: creando $${JOB}"
+          gcloud run jobs create "$${JOB}" \
+            --image="$${IMAGE}" \
+            --region="$${REGION}" \
+            --set-env-vars="$${ENV_VARS}" \
+            --service-account="$${SA}" \
+            --task-timeout=3600 \
+            --memory=4Gi \
+            --cpu=2 \
+            --max-retries=1 \
+            --command=python \
+            --args="$${ARGS}" || {
+            echo "⚠️ Error creando job (puede que ya exista), intentando actualizar..."
+            gcloud run jobs update "$${JOB}" \
+              --image="$${IMAGE}" \
+              --region="$${REGION}" \
+              --update-env-vars="$${ENV_VARS}" \
+              --service-account="$${SA}" \
+              --task-timeout=3600 \
+              --memory=4Gi \
+              --cpu=2 \
+              --max-retries=1 \
+              --command=python \
+              --args="$${ARGS}"
+          }
+        fi
+    waitFor: [push-sha, push-latest]
+
+images:
+  - ${_IMAGE}:${SHORT_SHA}
+  - ${_IMAGE}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+secrets/
+downloads/
+debug/
+__pycache__/
+*.pyc
+*.md
+.pytest_cache/
+**/__pycache__/
+**/*.pyc

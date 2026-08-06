@@ -1,0 +1,833 @@
+"""Utilidades mínimas de Selenium para ir armando el scraper paso a paso."""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import sys
+import time
+import unicodedata
+from calendar import month_name
+from datetime import date
+from pathlib import Path
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import Select, WebDriverWait
+from webdriver_manager.chrome import ChromeDriverManager
+
+from config import (
+    CHROME_BIN,
+    CHROMEDRIVER_PATH,
+    DEBUG_DIR,
+    DOWNLOAD_DIR,
+    EXPLICIT_WAIT,
+    HEADLESS,
+    IMPLICIT_WAIT,
+    IS_CLOUD_RUN,
+)
+
+logger = logging.getLogger(__name__)
+
+IS_WINDOWS = sys.platform == "win32"
+
+MESES_ES = (
+    "",
+    "enero",
+    "febrero",
+    "marzo",
+    "abril",
+    "mayo",
+    "junio",
+    "julio",
+    "agosto",
+    "septiembre",
+    "octubre",
+    "noviembre",
+    "diciembre",
+)
+
+
+def mes_anterior(referencia: date | None = None) -> date:
+    ref = referencia or date.today()
+    if ref.month == 1:
+        return date(ref.year - 1, 12, 1)
+    return date(ref.year, ref.month - 1, 1)
+
+
+def _chrome_bin() -> str | None:
+    if CHROME_BIN and Path(CHROME_BIN).exists():
+        return CHROME_BIN
+    if IS_WINDOWS:
+        for p in (
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(
+                r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+            ),
+        ):
+            if p and Path(p).exists():
+                return p
+        return None
+    for p in ("/usr/bin/google-chrome", "/usr/bin/google-chrome-stable", "/usr/bin/chromium"):
+        if Path(p).exists():
+            return p
+    return None
+
+
+def _chromedriver_path() -> str | None:
+    if CHROMEDRIVER_PATH and Path(CHROMEDRIVER_PATH).exists():
+        return CHROMEDRIVER_PATH
+    linux_sys = Path("/usr/local/bin/chromedriver")
+    if not IS_WINDOWS and linux_sys.exists() and os.access(linux_sys, os.X_OK):
+        return str(linux_sys)
+    return None
+
+
+def iniciar_navegador(
+    headless: bool | None = None,
+    download_dir: Path | None = None,
+) -> tuple[webdriver.Chrome, WebDriverWait]:
+    options = Options()
+    use_headless = HEADLESS if headless is None else headless
+    if use_headless or IS_CLOUD_RUN:
+        options.add_argument("--headless=new")
+        options.add_argument("--remote-debugging-port=9222")
+
+    # Obligatorias en Cloud Run / contenedor
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    if IS_CLOUD_RUN or use_headless:
+        options.add_argument("--disable-software-rasterizer")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-background-networking")
+
+    chrome_bin = _chrome_bin()
+    if chrome_bin:
+        options.binary_location = chrome_bin
+        logger.info("Chrome binary: %s", chrome_bin)
+
+    dest = Path(download_dir or DOWNLOAD_DIR).resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    options.add_experimental_option(
+        "prefs",
+        {
+            "download.default_directory": str(dest),
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": True,
+            "plugins.always_open_pdf_externally": True,
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+        },
+    )
+    options.add_argument("--disable-save-password-bubble")
+    options.add_argument(
+        "--disable-features=PasswordManagerOnboarding,PasswordCheck,PasswordManager"
+    )
+
+    driver_path = _chromedriver_path()
+    if driver_path:
+        logger.info("ChromeDriver: %s", driver_path)
+        service = Service(driver_path)
+    else:
+        logger.info("ChromeDriver: webdriver-manager")
+        service = Service(ChromeDriverManager().install())
+
+    driver = webdriver.Chrome(service=service, options=options)
+    driver.implicitly_wait(IMPLICIT_WAIT)
+    wait = WebDriverWait(driver, EXPLICIT_WAIT)
+    logger.info(
+        "Navegador iniciado headless=%s cloud=%s descargas=%s",
+        use_headless or IS_CLOUD_RUN,
+        IS_CLOUD_RUN,
+        dest,
+    )
+    return driver, wait
+
+
+def escribir_xpath(driver, wait: WebDriverWait, xpath: str, texto: str) -> None:
+    el = wait.until(EC.visibility_of_element_located((By.XPATH, xpath)))
+    el.clear()
+    el.send_keys(texto)
+
+
+def click_xpath(driver, wait: WebDriverWait, xpath: str) -> None:
+    el = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+    try:
+        driver.execute_script(
+            "arguments[0].scrollIntoView({block: 'center'});", el
+        )
+        time.sleep(0.3)
+        el.click()
+    except Exception:
+        # Overlay / chat / footer interceptando el click nativo
+        logger.warning("Click nativo interceptado; reintento con JS: %s", xpath)
+        driver.execute_script("arguments[0].click();", el)
+
+
+def disparar_change(driver, el) -> None:
+    """Dispara change/input para que la UI habilite botones dependientes."""
+    driver.execute_script(
+        """
+        const el = arguments[0];
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        if (window.jQuery) { jQuery(el).trigger('change'); }
+        """,
+        el,
+    )
+
+
+def click_si_existe(driver, wait: WebDriverWait, xpath: str, timeout: float = 5) -> bool:
+    """Click si el elemento aparece; no falla si no está. Respeta timeout corto."""
+    try:
+        # Evitar que el implicit wait (10s) alargue un timeout de 1s
+        driver.implicitly_wait(0)
+        corto = WebDriverWait(driver, timeout)
+        el = corto.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+        el.click()
+        logger.info("Click OK: %s", xpath)
+        return True
+    except Exception:
+        return False
+    finally:
+        driver.implicitly_wait(IMPLICIT_WAIT)
+
+
+def _resolver_input_archivo(driver, wait: WebDriverWait, xpath: str):
+    """Devuelve un input[type=file]: el nodo, hijo, Dropzone.hiddenFileInput o hermano."""
+    el = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+    tag = (el.tag_name or "").lower()
+    tipo = (el.get_attribute("type") or "").lower()
+    if tag == "input" and tipo == "file":
+        return el
+
+    # Dropzone.js: el input real es .dz-hidden-input (a menudo fuera del árbol UI)
+    try:
+        dz_inp = driver.execute_script(
+            """
+            const el = arguments[0];
+            if (!el) return null;
+            let root = el;
+            if (el.classList && el.classList.contains('dz-message')) {
+                root = el.parentElement || el;
+            }
+            root = (root.closest && root.closest('.dropzone')) || root;
+            if (root && root.dropzone && root.dropzone.hiddenFileInput) {
+                return root.dropzone.hiddenFileInput;
+            }
+            // Fallback: último dz-hidden-input multiple (el dropzone de docs suele ser el 2º)
+            const all = Array.from(document.querySelectorAll('input.dz-hidden-input'));
+            const multi = all.filter(i => i.multiple);
+            if (multi.length) return multi[multi.length - 1];
+            return all.length ? all[all.length - 1] : null;
+            """,
+            el,
+        )
+        if dz_inp is not None:
+            logger.info("Input Dropzone resuelto desde zona %s", xpath)
+            return dz_inp
+    except Exception as exc:
+        logger.debug("Dropzone resolve falló: %s", exc)
+
+    internos = el.find_elements(By.XPATH, ".//input[@type='file']")
+    if internos:
+        return internos[0]
+    # A veces el input está como hermano cercano
+    hermanos = driver.find_elements(
+        By.XPATH, xpath + "/following::input[@type='file'][1]"
+    )
+    if hermanos:
+        return hermanos[0]
+    raise ValueError(f"No hay input[type=file] en ni bajo: {xpath}")
+
+
+def esperar_zona_documentos_habilitada(
+    driver,
+    zona_xpath: str,
+    *,
+    timeout: float = 120,
+) -> None:
+    """
+    Tras 'Cargar Excel', espera a que la zona de documentos acepte PDFs.
+    Considera dropzone.hiddenFileInput y ausencia del bloqueo 'SUBA SU PLANTILLA…'.
+    """
+    t0 = time.time()
+    last_log = 0.0
+    while time.time() - t0 < timeout:
+        ok = driver.execute_script(
+            """
+            const xpath = arguments[0];
+            const zona = document.evaluate(
+                xpath, document, null,
+                XPathResult.FIRST_ORDERED_NODE_TYPE, null
+            ).singleNodeValue;
+            if (!zona) return false;
+            const root = (zona.closest && zona.closest('.dropzone')) || zona;
+            const txt = ((root.innerText || root.textContent || '') + '').toUpperCase();
+            if (txt.includes('SUBA SU PLANTILLA ANTES')) return false;
+            if (root.dropzone && root.dropzone.hiddenFileInput
+                && !root.dropzone.hiddenFileInput.disabled) {
+                return true;
+            }
+            const multi = Array.from(
+                document.querySelectorAll('input.dz-hidden-input')
+            ).filter(i => i.multiple && !i.disabled);
+            return multi.length > 0;
+            """,
+            zona_xpath,
+        )
+        if ok:
+            logger.info("Zona de documentos habilitada (%.0fs)", time.time() - t0)
+            return
+        now = time.time()
+        if now - last_log >= 5:
+            logger.info(
+                "Esperando habilitación de zona docs tras Cargar Excel… (%.0fs)",
+                now - t0,
+            )
+            last_log = now
+        time.sleep(0.5)
+    raise TimeoutError(
+        f"Timeout {timeout:.0f}s: zona de documentos no se habilitó tras Cargar Excel"
+    )
+
+
+def subir_archivo(driver, wait: WebDriverWait, xpath: str, ruta: Path) -> None:
+    """Envía un archivo a un input file (o zona con input oculto)."""
+    path = Path(ruta).resolve()
+    if not path.exists():
+        raise FileNotFoundError(path)
+    inp = _resolver_input_archivo(driver, wait, xpath)
+    inp.send_keys(str(path))
+    logger.info("Archivo enviado: %s", path.name)
+
+
+def _estado_zona_upload(driver, zona_xpath: str) -> dict:
+    """
+    Inspecciona la zona de documentos (Dropzone Subcontrataley / template cards).
+    Cuenta .card con dz-* o filas .pdf en el texto (no solo .dz-preview clásico).
+    """
+    return driver.execute_script(
+        """
+        const xpath = arguments[0];
+        const zona = document.evaluate(
+            xpath, document, null,
+            XPathResult.FIRST_ORDERED_NODE_TYPE, null
+        ).singleNodeValue;
+        if (!zona) return {items: 0, processing: 0, progress: 0, ready: false};
+
+        const root = (zona.closest && zona.closest('.dropzone')) || zona;
+
+        // UI Subcontrataley: cada archivo es .card con clases dz-*
+        let cards = root.querySelectorAll(
+            '.card.dz-success, .card.dz-complete, .card.dz-processing, .card.dz-error'
+        );
+        if (!cards.length) {
+            cards = root.querySelectorAll('.dz-preview, .dz-file-preview');
+        }
+        if (!cards.length) {
+            cards = root.querySelectorAll('.card.mt-1');
+        }
+        let items = cards.length;
+        if (!items) {
+            const texts = (root.innerText || '').split(/\\n+/).filter(t => /\\.pdf/i.test(t));
+            items = texts.length;
+        }
+
+        const processing = root.querySelectorAll(
+            '.dz-processing:not(.dz-success):not(.dz-complete), .dz-uploading, .uploading'
+        ).length;
+
+        let progress = 0;
+        root.querySelectorAll('.progress-bar, .dz-upload, progress').forEach(el => {
+            const styleW = (el.style && el.style.width) ? parseFloat(el.style.width) : NaN;
+            const w = !isNaN(styleW) ? styleW : parseFloat(el.getAttribute('aria-valuenow') || 'NaN');
+            if (!isNaN(w) && w < 99.5) progress += 1;
+            else if (isNaN(w) && el.offsetParent !== null && el.classList.contains('progress-bar')) {
+                // barra sin ancho numérico: no asumir incompleto si ya hay success
+            }
+        });
+
+        const errors = root.querySelectorAll('.dz-error, .qq-upload-fail').length;
+        const complete = root.querySelectorAll(
+            '.card.dz-success, .card.dz-complete, .dz-success, .dz-complete'
+        ).length;
+
+        return {
+            items: items,
+            processing: processing,
+            progress: progress,
+            complete: complete,
+            errors: errors,
+            ready: progress === 0 && items > 0,
+        };
+        """,
+        zona_xpath,
+    )
+
+
+def esperar_uploads_completos(
+    driver,
+    zona_xpath: str,
+    *,
+    n_min: int | None = None,
+    timeout: float = 600,
+    estable_s: float = 3.0,
+) -> dict:
+    """
+    Espera a que terminen las subidas en la zona (sin barras de progreso activas).
+    Si n_min, también exige al menos esa cantidad de items en la UI.
+    """
+    t0 = time.time()
+    last_log = 0.0
+    estable_desde: float | None = None
+    ultimo: dict = {}
+
+    while time.time() - t0 < timeout:
+        ultimo = _estado_zona_upload(driver, zona_xpath) or {}
+        items = int(ultimo.get("items") or 0)
+        progress = int(ultimo.get("progress") or 0)
+        complete = int(ultimo.get("complete") or 0)
+        ok_n = n_min is None or items >= n_min
+        # Completo si no hay progreso y conteo OK; refuerzo si Dropzone marca success.
+        ready = ok_n and progress == 0 and (complete >= (n_min or 0) or complete == 0 or complete >= items * 0.9)
+
+        if ready:
+            if estable_desde is None:
+                estable_desde = time.time()
+            elif time.time() - estable_desde >= estable_s:
+                logger.info(
+                    "Uploads OK zona=%s items=%s complete=%s (%.0fs)",
+                    zona_xpath,
+                    items,
+                    ultimo.get("complete"),
+                    time.time() - t0,
+                )
+                return ultimo
+        else:
+            estable_desde = None
+
+        now = time.time()
+        if now - last_log >= 5:
+            logger.info(
+                "Esperando uploads… items=%s processing=%s progress=%s complete=%s n_min=%s (%.0fs)",
+                items,
+                ultimo.get("processing"),
+                progress,
+                complete,
+                n_min,
+                now - t0,
+            )
+            last_log = now
+        time.sleep(0.5)
+
+    raise TimeoutError(
+        f"Timeout {timeout:.0f}s esperando uploads en {zona_xpath}. "
+        f"Último estado={ultimo}"
+    )
+
+
+def subir_archivos(
+    driver,
+    wait: WebDriverWait,
+    xpath: str,
+    rutas: list[Path],
+    *,
+    esperar: bool = True,
+    timeout: float = 600,
+    uno_a_uno: bool = True,
+) -> None:
+    """
+    Envía archivos a un input file (o zona Dropzone).
+
+    Por defecto sube de a uno: en Chrome/Windows un send_keys multi con
+    rutas con espacios a menudo no inserta ningún archivo.
+    """
+    paths = [Path(p).resolve() for p in rutas]
+    faltan = [str(p) for p in paths if not p.exists()]
+    if faltan:
+        raise FileNotFoundError(f"No existen: {faltan[:5]}")
+    if not paths:
+        logger.warning("sin archivos para subir en %s", xpath)
+        return
+
+    base = int((_estado_zona_upload(driver, xpath) or {}).get("items") or 0)
+
+    if uno_a_uno:
+        for i, path in enumerate(paths, start=1):
+            # Re-resolve cada vez: Dropzone a veces recrea el hidden input
+            inp = _resolver_input_archivo(driver, wait, xpath)
+            try:
+                driver.execute_script(
+                    "arguments[0].style.display='block';"
+                    "arguments[0].removeAttribute('hidden');",
+                    inp,
+                )
+            except Exception:
+                pass
+            inp.send_keys(str(path))
+            logger.info("PDF %s/%s enviado: %s", i, len(paths), path.name)
+            if not esperar:
+                continue
+            objetivo = base + i
+            t0 = time.time()
+            ok = False
+            while time.time() - t0 < min(120.0, max(60.0, timeout)):
+                st = _estado_zona_upload(driver, xpath) or {}
+                items = int(st.get("items") or 0)
+                # Nombre visible en la zona (más fiable que solo el contador)
+                visible = driver.execute_script(
+                    """
+                    const xp = arguments[0], name = arguments[1];
+                    const el = document.evaluate(
+                        xp, document, null,
+                        XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                    ).singleNodeValue;
+                    const root = (el && el.closest)
+                        ? (el.closest('.dropzone') || el) : el;
+                    return !!(root && (root.innerText || '').includes(name));
+                    """,
+                    xpath,
+                    path.name,
+                )
+                if visible and items >= objetivo:
+                    ok = True
+                    break
+                if visible and items >= i:  # tolerar base distinto
+                    ok = True
+                    break
+                time.sleep(0.35)
+            if not ok:
+                logger.warning(
+                    "PDF %s no confirmado a tiempo (objetivo items=%s)",
+                    path.name,
+                    objetivo,
+                )
+            else:
+                # estabilizar barras un momento
+                time.sleep(0.4)
+        # Espera final global sin progreso
+        if esperar:
+            esperar_uploads_completos(
+                driver,
+                xpath,
+                n_min=len(paths),
+                timeout=min(120.0, timeout),
+                estable_s=2.0,
+            )
+        logger.info(
+            "Enviados %s archivo(s) uno-a-uno (base=%s) a %s",
+            len(paths),
+            base,
+            xpath,
+        )
+        return
+
+    # Fallback multi (puede fallar con espacios en el nombre)
+    inp = _resolver_input_archivo(driver, wait, xpath)
+    inp.send_keys("\n".join(str(p) for p in paths))
+    logger.info("Enviados %s archivo(s) multi a %s", len(paths), xpath)
+    if esperar:
+        esperar_uploads_completos(
+            driver, xpath, n_min=base + len(paths), timeout=timeout
+        )
+
+
+def _norm(texto: str) -> str:
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", texto).strip().lower()
+
+
+def _select_el(wait: WebDriverWait, xpath: str) -> Select:
+    el = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+    return Select(el)
+
+
+def seleccionar_por_texto(driver, wait: WebDriverWait, xpath: str, texto: str) -> str:
+    """Elige una opción de <select> por texto visible (match exacto o contenido)."""
+    el = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+    select = Select(el)
+    objetivo = _norm(texto)
+    for opt in select.options:
+        label = (opt.text or "").strip()
+        if not label:
+            continue
+        if _norm(label) == objetivo or objetivo in _norm(label):
+            select.select_by_visible_text(opt.text)
+            disparar_change(driver, el)
+            logger.info("Select %s → '%s'", xpath, opt.text.strip())
+            return opt.text.strip()
+    disponibles = [o.text.strip() for o in select.options if o.text.strip()]
+    raise ValueError(
+        f"No encontré '{texto}' en select {xpath}. Opciones: {disponibles}"
+    )
+
+
+def _opciones_periodo_utiles(select: Select) -> list:
+    skip = {"", "seleccione", "seleccionar", "periodo", "período", "-"}
+    utiles = []
+    for opt in select.options:
+        label = (opt.text or "").strip()
+        if not label or _norm(label) in skip:
+            continue
+        utiles.append(opt)
+    return utiles
+
+
+def esperar_select_cargado(
+    driver,
+    wait: WebDriverWait,
+    xpath: str,
+    *,
+    min_opciones: int = 1,
+    timeout: float | None = None,
+) -> Select:
+    """
+    Espera a que un <select> esté habilitado y tenga opciones útiles
+    (tras un cambio async, p.ej. tipo de documento → periodos).
+    Tolera StaleElementReference mientras el DOM se regenera.
+    """
+    from selenium.common.exceptions import StaleElementReferenceException
+
+    t = timeout if timeout is not None else EXPLICIT_WAIT
+    skip = {"", "seleccione", "seleccionar", "periodo", "período", "-", "todos", "todas"}
+
+    def _listo(drv):
+        try:
+            els = drv.find_elements(By.XPATH, xpath)
+            if not els:
+                return False
+            el = els[0]
+            if not el.is_displayed():
+                return False
+            if el.get_attribute("disabled") is not None:
+                return False
+            # Re-leer opciones desde el DOM actual (evita stale mid-reload)
+            options = el.find_elements(By.TAG_NAME, "option")
+            utiles = 0
+            for o in options:
+                try:
+                    label = (o.text or "").strip()
+                except StaleElementReferenceException:
+                    return False
+                if label and _norm(label) not in skip:
+                    utiles += 1
+            return utiles >= min_opciones
+        except StaleElementReferenceException:
+            return False
+
+    WebDriverWait(driver, t).until(_listo)
+    # Re-obtener select fresco (el DOM se reescribe al elegir documento)
+    for intento in range(5):
+        try:
+            el = driver.find_element(By.XPATH, xpath)
+            select = Select(el)
+            n = len(_opciones_periodo_utiles(select))
+            logger.info("Select cargado (%s opciones útiles): %s", n, xpath)
+            return select
+        except StaleElementReferenceException:
+            time.sleep(0.3)
+    el = driver.find_element(By.XPATH, xpath)
+    select = Select(el)
+    n = len(_opciones_periodo_utiles(select))
+    logger.info("Select cargado (%s opciones útiles): %s", n, xpath)
+    return select
+
+
+def _periodo_coincide(label: str, anio: int, mes: int) -> bool:
+    """
+    Match estricto de periodo UI tipo 'Jun 2026' / 'junio 2026' / '06/2026'.
+    No usa el dígito suelto del mes (evita que '6' matchee dentro de '2026').
+    """
+    n = _norm(label)
+    anio_s = str(anio)
+    if anio_s not in n:
+        return False
+
+    mes_es = MESES_ES[mes]
+    mes_en = month_name[mes].lower()
+    abbr_es = (
+        "",
+        "ene",
+        "feb",
+        "mar",
+        "abr",
+        "may",
+        "jun",
+        "jul",
+        "ago",
+        "sep",
+        "oct",
+        "nov",
+        "dic",
+    )[mes]
+    abbr_en = mes_en[:3]  # jan, feb, ..., jun
+    mes_2 = f"{mes:02d}"
+
+    # Tokens de mes con límite de palabra (no substring dentro del año)
+    patrones = [
+        rf"\b{re.escape(mes_es)}\b",
+        rf"\b{re.escape(mes_en)}\b",
+        rf"\b{re.escape(abbr_es)}\b",
+        rf"\b{re.escape(abbr_en)}\b",
+        rf"\b{mes_2}/{anio}\b",
+        rf"\b{mes}/{anio}\b",
+        rf"\b{anio}-{mes_2}\b",
+        rf"\b{anio}/{mes_2}\b",
+        rf"\b{mes_2}\s+{anio}\b",
+    ]
+    return any(re.search(p, n) for p in patrones)
+
+
+def seleccionar_periodo_mes_anterior(
+    driver,
+    wait: WebDriverWait,
+    xpath: str,
+    referencia: date | None = None,
+) -> str:
+    """
+    Elige el periodo del mes anterior a la ejecución.
+    Si no hay match de texto, usa la última opción disponible del select.
+    """
+    ref = referencia or date.today()
+    periodo = mes_anterior(ref)
+    el = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+    select = Select(el)
+    utiles = _opciones_periodo_utiles(select)
+
+    if not utiles:
+        raise ValueError(f"Select de periodo sin opciones útiles: {xpath}")
+
+    elegido = None
+    for opt in utiles:
+        if _periodo_coincide(opt.text, periodo.year, periodo.month):
+            select.select_by_visible_text(opt.text)
+            elegido = opt.text.strip()
+            logger.info(
+                "Periodo mes anterior %04d-%02d → '%s'",
+                periodo.year,
+                periodo.month,
+                elegido,
+            )
+            break
+
+    if elegido is None:
+        opt = utiles[-1]
+        select.select_by_visible_text(opt.text)
+        elegido = opt.text.strip()
+        logger.warning(
+            "No matcheé mes anterior %04d-%02d; usé última opción: '%s'",
+            periodo.year,
+            periodo.month,
+            elegido,
+        )
+
+    disparar_change(driver, el)
+    return elegido
+
+
+def _archivos_completos(directorio: Path, glob_pat: str) -> set[Path]:
+    """Archivos que ya terminaron de bajar (sin .crdownload / .tmp)."""
+    incompletos = {".crdownload", ".tmp", ".part"}
+    out: set[Path] = set()
+    for p in directorio.glob(glob_pat):
+        if p.suffix.lower() in incompletos:
+            continue
+        if any(p.name.endswith(ext) for ext in incompletos):
+            continue
+        # Chrome a veces deja nombre.xlsx.crdownload
+        if p.exists() and p.is_file():
+            out.add(p.resolve())
+    return out
+
+
+def esperar_boton_habilitado(
+    driver,
+    wait: WebDriverWait,
+    xpath: str,
+    timeout: float | None = None,
+):
+    """Espera a que el botón exista, esté visible y sin atributo disabled."""
+    t = timeout if timeout is not None else EXPLICIT_WAIT
+
+    def _enabled(drv):
+        els = drv.find_elements(By.XPATH, xpath)
+        if not els:
+            return False
+        el = els[0]
+        if not el.is_displayed():
+            return False
+        # En HTML, presencia de disabled (aunque sea "") = no clickeable
+        if el.get_attribute("disabled") is not None:
+            return False
+        return el.is_enabled()
+
+    WebDriverWait(driver, t).until(_enabled)
+    el = driver.find_element(By.XPATH, xpath)
+    logger.info("Botón habilitado: %s", xpath)
+    return el
+
+
+def click_y_esperar_descarga(
+    driver,
+    wait: WebDriverWait,
+    xpath: str,
+    *,
+    download_dir: Path | None = None,
+    glob_pat: str = "cmsd_plantilla_*.xlsx",
+    timeout: float = 60,
+) -> Path:
+    """Click que dispara una descarga; espera un archivo nuevo que matchee glob_pat."""
+    dest = Path(download_dir or DOWNLOAD_DIR).resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    antes = _archivos_completos(dest, glob_pat)
+
+    esperar_boton_habilitado(driver, wait, xpath, timeout=min(30, timeout))
+    click_xpath(driver, wait, xpath)
+    logger.info("Click descarga; esperando %s en %s", glob_pat, dest)
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        # Descarga en curso
+        if list(dest.glob("*.crdownload")) or list(dest.glob("*.tmp")):
+            time.sleep(0.5)
+            continue
+        nuevos = _archivos_completos(dest, glob_pat) - antes
+        if nuevos:
+            archivo = max(nuevos, key=lambda p: p.stat().st_mtime)
+            # Asegurar que el tamaño ya no crece
+            size1 = archivo.stat().st_size
+            time.sleep(0.5)
+            size2 = archivo.stat().st_size
+            if size1 == size2 and size2 > 0:
+                logger.info("Descarga lista: %s (%s bytes)", archivo.name, size2)
+                return archivo
+        time.sleep(0.5)
+
+    raise TimeoutError(
+        f"No apareció descarga '{glob_pat}' en {dest} tras {timeout}s"
+    )
+
+
+def screenshot(driver, nombre: str = "debug.png") -> Path:
+    path = DEBUG_DIR / nombre
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        driver.save_screenshot(str(path))
+        logger.info("Screenshot: %s", path)
+    except Exception as exc:
+        logger.warning("Screenshot falló (%s): %s", nombre, exc)
+    return path
