@@ -113,6 +113,26 @@ python run_flujo.py --list
 python run_flujo.py liquidaciones
 ```
 
+## GCS — Tres raíces (lectura)
+
+Los flujos que bajan PDFs (`liquidaciones`, `libro_asistencia`, pagos) leen el bucket
+`worldwide-documentos-instalaciones` vía `gcs_docs.py`.
+
+Rutas canónicas (personales):
+
+```text
+Trabajadores/{rut}/Liquidacion/{mes año}/*.pdf
+Trabajadores/{rut}/Transferencia/{mes año}/*.pdf
+Trabajadores/{rut}/Asistencia/{mes año}/*.pdf
+Trabajadores/{rut}/Cotizaciones/{YYYY}/{MM}/*.pdf
+```
+
+Durante la migración se mantiene dual-read: primero `Trabajadores/`, luego globs
+legacy (`{cecos}/{Tipo}/...` o `Industry|Security/{cecos}/...`). Si un RUT tiene
+ambos, gana la ruta bajo `Trabajadores/`.
+
+Este repo **no escribe** GCS (solo lista/descarga y sube al portal Subcontrataley).
+
 ## Convención de captura
 
 ```text

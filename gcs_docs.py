@@ -1,4 +1,15 @@
-"""Cliente GCS: buscar liquidaciones y transferencias por RUT + periodo."""
+"""Cliente GCS: buscar documentos personales por RUT + periodo (Tres raíces).
+
+Convención bucket `worldwide-documentos-instalaciones`:
+  Trabajadores/{rut}/{Tipo}/{periodo|YYYY/MM}/archivo.pdf   ← canónico (este scraper)
+  Instalaciones/{Industry|Security}/{cecos}/{Tipo}/...      ← faena (no usa SCL)
+  Documentos_Generales/{carpeta}/...                        ← globales (no usa SCL)
+
+Tipos que consume Subcontrataley (todos personales):
+  Liquidacion, Transferencia, Asistencia, Cotizaciones
+
+Lectura dual durante migración: primero `Trabajadores/`, luego globs legacy.
+"""
 
 from __future__ import annotations
 
@@ -16,13 +27,27 @@ from config import GCS_BUCKET_NAME, GCS_CREDENTIALS_PATH
 
 logger = logging.getLogger(__name__)
 
+RAIZ_TRABAJADORES = "Trabajadores"
+
+# Tipos personales que Subcontrataley lee desde Trabajadores/{rut}/...
+TIPOS_PERSONALES_SCL = frozenset(
+    {
+        "Liquidacion",
+        "Transferencia",
+        "Asistencia",
+        "Cotizaciones",
+    }
+)
+
+_RUT_CARPETA_RE = re.compile(r"^(\d{7,8})(?:-[\dkK])?$")
+
 
 @dataclass
 class DocGCS:
     nombre: str
     ruta_gcs: str
     rut_cuerpo: str
-    tipo: str  # Liquidacion | Transferencia
+    tipo: str  # Liquidacion | Transferencia | Asistencia | Cotizaciones
 
 
 def periodo_gcs_texto(referencia: date | None = None) -> str:
@@ -66,6 +91,32 @@ def _rut_desde_nombre_archivo(nombre: str) -> str:
     return m2.group(1) if m2 else ""
 
 
+def _rut_desde_ruta_gcs(ruta: str) -> str:
+    """
+    RUT desde Tres raíces: Trabajadores/{rut}/Tipo/...
+    Acepta carpeta con o sin DV (`12345678` o `12345678-9`).
+    """
+    partes = [p for p in str(ruta).strip("/").split("/") if p]
+    if len(partes) < 2 or partes[0] != RAIZ_TRABAJADORES:
+        return ""
+    m = _RUT_CARPETA_RE.match(partes[1].strip())
+    if not m:
+        return ""
+    return m.group(1)
+
+
+def _rut_cuerpo_de_blob(ruta_gcs: str, nombre: str) -> str:
+    """Prefiere RUT del nombre de archivo; si falta, carpeta Trabajadores/{rut}/."""
+    cuerpo = _rut_desde_nombre_archivo(nombre)
+    if cuerpo:
+        return cuerpo
+    return _rut_desde_ruta_gcs(ruta_gcs)
+
+
+def _es_ruta_trabajadores(ruta: str) -> bool:
+    return str(ruta).startswith(f"{RAIZ_TRABAJADORES}/")
+
+
 def periodo_gcs_yyyy_mm(referencia: date | None = None) -> tuple[str, str, str]:
     """
     Periodo mes anterior como (texto 'junio 2026', '2026', '06').
@@ -74,6 +125,69 @@ def periodo_gcs_yyyy_mm(referencia: date | None = None) -> tuple[str, str, str]:
     p = mes_anterior(referencia)
     texto = f"{MESES_ES[p.month]} {p.year}"
     return texto, str(p.year), f"{p.month:02d}"
+
+
+def _globs_periodo(
+    tipo: str,
+    *,
+    layout: str,
+    periodo: str,
+    anio: str | None,
+    mes: str | None,
+) -> list[tuple[str, str]]:
+    """
+    Lista de (glob, etiqueta) en orden de preferencia.
+    1) Tres raíces Trabajadores/
+    2) Legacy **/{Tipo}/... (cecos o Industry/Security/cecos)
+    """
+    out: list[tuple[str, str]] = []
+    if layout == "yyyy_mm":
+        assert anio and mes
+        mes_alt = str(int(mes))
+        out.append(
+            (
+                f"{RAIZ_TRABAJADORES}/**/{tipo}/{anio}/{mes}/*.pdf",
+                "tres_raices",
+            )
+        )
+        if mes_alt != mes:
+            out.append(
+                (
+                    f"{RAIZ_TRABAJADORES}/**/{tipo}/{anio}/{mes_alt}/*.pdf",
+                    "tres_raices_mes_alt",
+                )
+            )
+        out.append((f"**/{tipo}/{anio}/{mes}/*.pdf", "legacy"))
+        if mes_alt != mes:
+            out.append((f"**/{tipo}/{anio}/{mes_alt}/*.pdf", "legacy_mes_alt"))
+    else:
+        out.append(
+            (
+                f"{RAIZ_TRABAJADORES}/**/{tipo}/{periodo}/*.pdf",
+                "tres_raices",
+            )
+        )
+        out.append((f"**/{tipo}/{periodo}/*.pdf", "legacy"))
+    return out
+
+
+def _needles_periodo(
+    tipo: str,
+    *,
+    layout: str,
+    periodo: str,
+    anio: str | None,
+    mes: str | None,
+) -> list[str]:
+    """Substrings para fallback por prefix (sin listar todo el bucket)."""
+    if layout == "yyyy_mm":
+        assert anio and mes
+        mes_alt = str(int(mes))
+        needles = [f"/{tipo}/{anio}/{mes}/"]
+        if mes_alt != mes:
+            needles.append(f"/{tipo}/{anio}/{mes_alt}/")
+        return needles
+    return [f"/{tipo}/{periodo}/"]
 
 
 def listar_docs_periodo(
@@ -89,8 +203,10 @@ def listar_docs_periodo(
     Lista PDFs de un tipo/periodo en el bucket.
 
     layout:
-      - mes_anio: **/{tipo}/{periodo}/*.pdf  (ej. Liquidacion/junio 2026)
-      - yyyy_mm:  **/{tipo}/{anio}/{mes}/*.pdf  (ej. Cotizaciones/2026/06)
+      - mes_anio: {Tipo}/{periodo}/*.pdf  (ej. Liquidacion/junio 2026)
+      - yyyy_mm:  {Tipo}/{anio}/{mes}/*.pdf  (ej. Cotizaciones/2026/06)
+
+    Preferencia Tres raíces (`Trabajadores/...`); fallback legacy.
     """
     bucket_name = bucket_name or GCS_BUCKET_NAME
     client = _cliente()
@@ -99,74 +215,92 @@ def listar_docs_periodo(
     if layout == "yyyy_mm":
         if not anio or not mes:
             _, anio, mes = periodo_gcs_yyyy_mm()
-        glob_pat = f"**/{tipo}/{anio}/{mes}/*.pdf"
-        needle = f"/{tipo}/{anio}/{mes}/"
-        # también mes sin cero a la izquierda
-        mes_alt = str(int(mes))
-        glob_alt = f"**/{tipo}/{anio}/{mes_alt}/*.pdf"
     else:
-        glob_pat = f"**/{tipo}/{periodo}/*.pdf"
-        needle = f"/{tipo}/{periodo}/"
-        glob_alt = None
+        anio = mes = None
 
-    logger.info("GCS list gs://%s match_glob=%s", bucket_name, glob_pat)
+    globs = _globs_periodo(
+        tipo, layout=layout, periodo=periodo, anio=anio, mes=mes
+    )
+    needles = _needles_periodo(
+        tipo, layout=layout, periodo=periodo, anio=anio, mes=mes
+    )
 
-    def _collect(glob_pattern: str) -> list[DocGCS]:
-        out: list[DocGCS] = []
+    por_ruta: dict[str, DocGCS] = {}
+
+    def _add_blob(blob_name: str) -> None:
+        if blob_name.endswith("/") or not blob_name.lower().endswith(".pdf"):
+            return
+        if not any(n in blob_name for n in needles):
+            return
+        if blob_name in por_ruta:
+            return
+        nombre = blob_name.rsplit("/", 1)[-1]
+        cuerpo = _rut_cuerpo_de_blob(blob_name, nombre)
+        if not cuerpo:
+            return
+        por_ruta[blob_name] = DocGCS(
+            nombre=nombre,
+            ruta_gcs=blob_name,
+            rut_cuerpo=cuerpo,
+            tipo=tipo,
+        )
+
+    def _collect_glob(glob_pattern: str) -> int:
+        n = 0
         try:
-            blobs = bucket.list_blobs(match_glob=glob_pattern)
-            for blob in blobs:
-                if blob.name.endswith("/"):
-                    continue
-                nombre = blob.name.rsplit("/", 1)[-1]
-                cuerpo = _rut_desde_nombre_archivo(nombre)
-                if not cuerpo:
-                    continue
-                out.append(
-                    DocGCS(
-                        nombre=nombre,
-                        ruta_gcs=blob.name,
-                        rut_cuerpo=cuerpo,
-                        tipo=tipo,
-                    )
-                )
+            for blob in bucket.list_blobs(match_glob=glob_pattern):
+                before = len(por_ruta)
+                _add_blob(blob.name)
+                if len(por_ruta) > before:
+                    n += 1
         except Exception as exc:
-            logger.warning("match_glob falló (%s); fallback prefix %s", exc, needle)
-            for blob in bucket.list_blobs():
-                if needle not in blob.name and (
-                    layout != "yyyy_mm"
-                    or f"/{tipo}/{anio}/{mes_alt}/" not in blob.name
-                ):
-                    continue
-                if not blob.name.lower().endswith(".pdf"):
-                    continue
-                nombre = blob.name.rsplit("/", 1)[-1]
-                cuerpo = _rut_desde_nombre_archivo(nombre)
-                if not cuerpo:
-                    continue
-                out.append(
-                    DocGCS(
-                        nombre=nombre,
-                        ruta_gcs=blob.name,
-                        rut_cuerpo=cuerpo,
-                        tipo=tipo,
-                    )
-                )
-        return out
+            logger.warning("match_glob falló (%s): %s", glob_pattern, exc)
+        return n
 
-    docs = _collect(glob_pat)
-    if not docs and glob_alt:
-        docs = _collect(glob_alt)
+    # 1) Tres raíces + legacy vía match_glob
+    for glob_pat, label in globs:
+        logger.info("GCS list gs://%s match_glob=%s [%s]", bucket_name, glob_pat, label)
+        got = _collect_glob(glob_pat)
+        logger.info("GCS %s → +%s archivo(s)", label, got)
+        # Si Tres raíces ya trajo resultados, aún corremos legacy por dual-read
+        # (algunos PDFs pueden quedar solo en cecos legacy).
 
-    logger.info("GCS %s/%s → %s archivo(s)", tipo, periodo, len(docs))
+    # 2) Fallback acotado: listar solo bajo Trabajadores/ (nunca el bucket entero)
+    if not por_ruta:
+        logger.warning(
+            "GCS match_glob vacío para %s/%s; fallback prefix=%s/",
+            tipo,
+            periodo,
+            RAIZ_TRABAJADORES,
+        )
+        for blob in bucket.list_blobs(prefix=f"{RAIZ_TRABAJADORES}/"):
+            _add_blob(blob.name)
+
+    docs = list(por_ruta.values())
+    # Preferencia estable: Trabajadores primero al iterar (índice luego pisa con preferencia)
+    docs.sort(key=lambda d: (0 if _es_ruta_trabajadores(d.ruta_gcs) else 1, d.ruta_gcs))
+    logger.info(
+        "GCS %s/%s → %s archivo(s) (%s en Trabajadores/)",
+        tipo,
+        periodo,
+        len(docs),
+        sum(1 for d in docs if _es_ruta_trabajadores(d.ruta_gcs)),
+    )
     return docs
 
 
 def indice_por_rut(docs: Iterable[DocGCS]) -> dict[str, DocGCS]:
-    """Un doc por RUT (si hay varios, se queda el último visto)."""
+    """
+    Un doc por RUT. Si hay duplicados (legacy + Tres raíces), gana Trabajadores/.
+    """
     out: dict[str, DocGCS] = {}
     for d in docs:
-        out[d.rut_cuerpo] = d
+        prev = out.get(d.rut_cuerpo)
+        if prev is None:
+            out[d.rut_cuerpo] = d
+            continue
+        if _es_ruta_trabajadores(d.ruta_gcs) and not _es_ruta_trabajadores(prev.ruta_gcs):
+            out[d.rut_cuerpo] = d
     return out
 
 
