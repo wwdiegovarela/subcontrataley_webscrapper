@@ -10,7 +10,14 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 from flows.plantilla_schema import HOJA_DOCUMENTOS
-from gcs_docs import DocGCS, buscar_liquidaciones_y_transferencias, descargar_doc, rut_cuerpo
+from generar_transferencia import crear_transferencia_una_linea, liquidacion_de_finiquitado
+from gcs_docs import (
+    DocGCS,
+    buscar_liquidaciones_y_transferencias,
+    descargar_doc,
+    rut_cuerpo,
+    tiene_finiquito,
+)
 from parse_liquidacion import parse_total_liquido
 
 logger = logging.getLogger(__name__)
@@ -42,6 +49,7 @@ class ResultadoRelleno:
     ruts_eliminados: list[str] = field(default_factory=list)
     docs_liquidacion: list[DocGCS] = field(default_factory=list)
     docs_transferencia: list[DocGCS] = field(default_factory=list)
+    transferencias_generadas: list[Path] = field(default_factory=list)
 
     @property
     def con_liquidacion(self) -> int:
@@ -71,22 +79,37 @@ def _es_liquido_cero(liq: DocGCS, cache_dir: Path) -> bool:
         return False
 
 
+def _nombre_transferencia(tr: DocGCS | Path | None) -> str:
+    if tr is None:
+        return ""
+    if isinstance(tr, Path):
+        return tr.name
+    return tr.nombre
+
+
 def rellenar_plantilla_liquidaciones(
     plantilla: Path,
     *,
     periodo_gcs: str | None = None,
     guardar_como: Path | None = None,
     solo_completos: bool = True,
+    dir_transferencias_generadas: Path | None = None,
 ) -> ResultadoRelleno:
     """
-    Columna A = Liquidación, B = Transferencia (nombres GCS).
+    Columna A = Liquidación, B = Transferencia (nombres GCS o generados).
 
     Reglas (solo_completos=True):
     - RUT con liquidación + transferencia → se mantiene
     - RUT con liquidación, sin transferencia, TOTAL LIQUIDO == 0 → se mantiene (B="")
+    - RUT finiquitado, con liquidación, sin transferencia y TOTAL LIQUIDO > 0
+      → se crea el comprobante de una línea y se pone en B
     - Resto → se borra del Excel
     """
     liqs, trs, periodo = buscar_liquidaciones_y_transferencias(periodo=periodo_gcs)
+    dir_gen = Path(
+        dir_transferencias_generadas
+        or (plantilla.parent / "transferencias_generadas")
+    )
     wb = load_workbook(plantilla)
     if HOJA_DOCUMENTOS not in wb.sheetnames:
         raise ValueError(f"No existe hoja '{HOJA_DOCUMENTOS}' en {plantilla}")
@@ -125,9 +148,12 @@ def rellenar_plantilla_liquidaciones(
                 a_mantener.append((row, rut_str, liq, tr))
                 continue
 
-            # Solo liquidación: permitir si TOTAL LIQUIDO == 0
+            # Solo liquidación: líquido 0 queda sin transferencia.
+            # El comprobante de una línea solo si está finiquitado y el líquido es > 0.
             if liq and not tr:
-                if _es_liquido_cero(liq, cache_dir):
+                local_liq = descargar_doc(liq, cache_dir)
+                monto = parse_total_liquido(local_liq)
+                if monto == 0:
                     logger.info(
                         "RUT %s: líquido=0 → liquidación sin transferencia",
                         rut_str,
@@ -135,9 +161,25 @@ def rellenar_plantilla_liquidaciones(
                     a_mantener.append((row, rut_str, liq, None))
                     res.liquido_cero += 1
                     continue
-                filas_a_borrar.append(row)
-                res.ruts_eliminados.append(rut_str)
-                logger.debug("Eliminar %s: sin transferencia y líquido!=0", rut_str)
+                finiquitado = liquidacion_de_finiquitado(local_liq) or tiene_finiquito(
+                    cuerpo
+                )
+                generada = None
+                if finiquitado and monto is not None and monto > 0:
+                    generada = crear_transferencia_una_linea(
+                        local_liq, dir_gen, periodo, monto
+                    )
+                if generada is None:
+                    filas_a_borrar.append(row)
+                    res.ruts_eliminados.append(rut_str)
+                    logger.info(
+                        "RUT %s: sin transferencia (finiquitado=%s)",
+                        rut_str,
+                        finiquitado,
+                    )
+                    continue
+                logger.info("RUT %s: transferencia creada %s", rut_str, generada.name)
+                a_mantener.append((row, rut_str, liq, generada))
                 continue
 
             # Sin liquidación (con o sin transferencia)
@@ -151,13 +193,16 @@ def rellenar_plantilla_liquidaciones(
             filas_a_borrar.append(row)
             continue
         ws.cell(row, COL_NOMBRE_ARCHIVO, liq.nombre)
-        ws.cell(row, COL_DOC_ASOCIADO_1, tr.nombre if tr else "")
+        ws.cell(row, COL_DOC_ASOCIADO_1, _nombre_transferencia(tr))
         for col in COLS_DOC_ASOCIADO_VACIAS:
             ws.cell(row, col, "")
         if liq.nombre not in vistos_liq:
             res.docs_liquidacion.append(liq)
             vistos_liq.add(liq.nombre)
-        if tr and tr.nombre not in vistos_tr:
+        if isinstance(tr, Path):
+            if tr not in res.transferencias_generadas:
+                res.transferencias_generadas.append(tr)
+        elif tr and tr.nombre not in vistos_tr:
             res.docs_transferencia.append(tr)
             vistos_tr.add(tr.nombre)
 
@@ -172,11 +217,12 @@ def rellenar_plantilla_liquidaciones(
     res.plantilla = dest
 
     logger.info(
-        "Plantilla periodo=%s | orig=%s | keep=%s (liq0=%s) | elim=%s → %s",
+        "Plantilla periodo=%s | orig=%s | keep=%s (liq0=%s, tr_generadas=%s) | elim=%s → %s",
         periodo,
         res.filas_originales,
         res.filas,
         res.liquido_cero,
+        len(res.transferencias_generadas),
         res.eliminadas,
         dest,
     )

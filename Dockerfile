@@ -65,7 +65,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Código de la app (sin secrets ni downloads locales)
 COPY config.py browser.py login.py xpaths.py gcs_docs.py ./
-COPY parse_liquidacion.py rellenar_plantilla.py rellenar_plantilla_unico.py ./
+COPY parse_liquidacion.py generar_transferencia.py rellenar_plantilla.py rellenar_plantilla_unico.py ./
+COPY assets/formato_transferencia.pdf ./assets/formato_transferencia.pdf
 COPY rellenar_plantilla_asistencias.py compilar_asistencias.py ./
 COPY rellenar_plantilla_trabajadores.py mapa_instalaciones_walmart.py ./
 COPY bq_empleados.py bq_asistencia.py cr_contratos.py ./

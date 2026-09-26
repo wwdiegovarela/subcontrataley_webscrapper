@@ -333,6 +333,20 @@ def buscar_liquidaciones_y_transferencias(
     return liqs, trs, periodo
 
 
+def tiene_finiquito(cuerpo: str, *, bucket_name: str | None = None) -> bool:
+    """True si Trabajadores/{rut}/Finiquito/ tiene al menos un PDF."""
+    cuerpo = rut_cuerpo(cuerpo)
+    if not cuerpo:
+        return False
+    client = _cliente()
+    bucket = client.bucket(bucket_name or GCS_BUCKET_NAME)
+    prefix = f"{RAIZ_TRABAJADORES}/{cuerpo}/Finiquito/"
+    for blob in bucket.list_blobs(prefix=prefix, max_results=5):
+        if blob.name.lower().endswith(".pdf"):
+            return True
+    return False
+
+
 def descargar_doc(doc: DocGCS, dest_dir: Path, *, bucket_name: str | None = None) -> Path:
     """Descarga el blob GCS a dest_dir conservando el nombre exacto (como en el Excel)."""
     dest_dir = Path(dest_dir)

@@ -59,15 +59,18 @@ def ejecutar(driver, wait) -> Path:
     screenshot(driver, "liquidaciones_despues_descarga.png")
 
     periodo_gcs = periodo_gcs_texto()
+    staging = DOWNLOAD_DIR / "staging_liquidaciones" / periodo_gcs.replace(" ", "_")
     logger.info(
         "Rellenando plantilla desde GCS (UI='%s', GCS='%s')",
         periodo_ui,
         periodo_gcs,
     )
-    resultado = rellenar_plantilla_liquidaciones(plantilla, periodo_gcs=periodo_gcs)
+    resultado = rellenar_plantilla_liquidaciones(
+        plantilla,
+        periodo_gcs=periodo_gcs,
+        dir_transferencias_generadas=staging / "transferencias",
+    )
     plantilla = resultado.plantilla
-
-    staging = DOWNLOAD_DIR / "staging_liquidaciones" / periodo_gcs.replace(" ", "_")
     logger.info(
         "Descargando PDFs solo de RUTs completos (%s) → %s",
         resultado.filas,
@@ -75,6 +78,7 @@ def ejecutar(driver, wait) -> Path:
     )
     paths_liq = descargar_docs(resultado.docs_liquidacion, staging / "liquidaciones")
     paths_tr = descargar_docs(resultado.docs_transferencia, staging / "transferencias")
+    paths_tr.extend(resultado.transferencias_generadas)
 
     logger.info("Ir a pantalla de carga")
     click_xpath(driver, wait, xp("liquidaciones.ir_a_cargar"))

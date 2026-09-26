@@ -33,6 +33,7 @@ temp/
 *.xls
 !~$*.xlsx
 *.pdf
+!assets/formato_transferencia.pdf
 *.zip
 *.rar
 *.7z
