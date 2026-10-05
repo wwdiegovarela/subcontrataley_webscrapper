@@ -72,6 +72,8 @@ COPY rellenar_plantilla_trabajadores.py mapa_instalaciones_walmart.py ./
 COPY bq_empleados.py bq_asistencia.py cr_contratos.py ./
 COPY comparar_trabajadores.py leer_listado_trabajadores.py ./
 COPY run_flujo.py libro_asistencia_cloudrun.py ingreso_trabajadores_cloudrun.py ./
+COPY liquidaciones_cloudrun.py pagos_afp_afc_cloudrun.py pagos_isapre_fonasa_cloudrun.py ./
+COPY pagos_mutualidades_cloudrun.py pagos_cajas_compensacion_cloudrun.py ./
 COPY flows/ ./flows/
 
 RUN mkdir -p /tmp/subcontrataley_downloads /tmp/subcontrataley_debug

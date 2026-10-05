@@ -30,11 +30,15 @@ steps:
   # Paso 2: Push
   - name: gcr.io/cloud-builders/docker
     id: push-sha
-    args: [push, ${_IMAGE}:${SHORT_SHA}]
+    args:
+      - push
+      - ${_IMAGE}:${SHORT_SHA}
 
   - name: gcr.io/cloud-builders/docker
     id: push-latest
-    args: [push, ${_IMAGE}:latest]
+    args:
+      - push
+      - ${_IMAGE}:latest
 
   # Paso 3: Job Libro de Asistencia
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk
@@ -152,6 +156,56 @@ steps:
               --args="$${ARGS}"
           }
         fi
+    waitFor: [push-sha, push-latest]
+
+  # Paso 5: un job independiente por flujo (script propio, sin args compartidos)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -e
+        REGION="${_REGION}"
+        IMAGE="${_IMAGE}:${SHORT_SHA}"
+        ENV_VARS="${_ENV_BASE}"
+        SA="${_SA}"
+
+        deploy() {
+          local JOB="$$1"
+          local ARGS="$$2"
+          echo "🔧 $${JOB} → $${ARGS}"
+          if gcloud run jobs describe "$${JOB}" --region "$${REGION}" >/dev/null 2>&1; then
+            gcloud run jobs update "$${JOB}" \
+              --image="$${IMAGE}" \
+              --region="$${REGION}" \
+              --update-env-vars="$${ENV_VARS}" \
+              --service-account="$${SA}" \
+              --task-timeout=3600 \
+              --memory=4Gi \
+              --cpu=2 \
+              --max-retries=1 \
+              --command=python \
+              --args="$${ARGS}"
+          else
+            gcloud run jobs create "$${JOB}" \
+              --image="$${IMAGE}" \
+              --region="$${REGION}" \
+              --set-env-vars="$${ENV_VARS}" \
+              --service-account="$${SA}" \
+              --task-timeout=3600 \
+              --memory=4Gi \
+              --cpu=2 \
+              --max-retries=1 \
+              --command=python \
+              --args="$${ARGS}"
+          fi
+        }
+
+        deploy subcontrataley-liquidaciones liquidaciones_cloudrun.py
+        deploy subcontrataley-pagos-afp-afc pagos_afp_afc_cloudrun.py
+        deploy subcontrataley-pagos-isapre-fonasa pagos_isapre_fonasa_cloudrun.py
+        deploy subcontrataley-pagos-mutualidades pagos_mutualidades_cloudrun.py
+        deploy subcontrataley-pagos-cajas pagos_cajas_compensacion_cloudrun.py
     waitFor: [push-sha, push-latest]
 
 images:

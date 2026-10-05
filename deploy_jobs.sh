@@ -60,6 +60,11 @@ deploy_job() {
 
 deploy_job "subcontrataley-libro-asistencia" "libro_asistencia_cloudrun.py"
 deploy_job "subcontrataley-ingreso-trabajadores" "ingreso_trabajadores_cloudrun.py"
+deploy_job "subcontrataley-liquidaciones" "liquidaciones_cloudrun.py"
+deploy_job "subcontrataley-pagos-afp-afc" "pagos_afp_afc_cloudrun.py"
+deploy_job "subcontrataley-pagos-isapre-fonasa" "pagos_isapre_fonasa_cloudrun.py"
+deploy_job "subcontrataley-pagos-mutualidades" "pagos_mutualidades_cloudrun.py"
+deploy_job "subcontrataley-pagos-cajas" "pagos_cajas_compensacion_cloudrun.py"
 
 echo "✅ Todos los jobs desplegados."
 echo ""
