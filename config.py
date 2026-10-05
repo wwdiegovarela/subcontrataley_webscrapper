@@ -22,6 +22,9 @@ HEADLESS = os.getenv(
     "true" if IS_CLOUD_RUN else "false",
 ).lower() in ("1", "true", "yes")
 
+# DRY_RUN: recorre todo el flujo pero NO dispara la carga final al portal.
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+
 IMPLICIT_WAIT = int(os.getenv("IMPLICIT_WAIT", "10"))
 EXPLICIT_WAIT = int(os.getenv("EXPLICIT_WAIT", "30" if IS_CLOUD_RUN else "20"))
 

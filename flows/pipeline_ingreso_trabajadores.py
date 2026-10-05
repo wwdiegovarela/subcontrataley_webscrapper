@@ -20,7 +20,7 @@ import time
 from datetime import date
 from pathlib import Path
 
-from browser import click_xpath, click_y_esperar_descarga, screenshot
+from browser import click_si_existe, click_xpath, click_y_esperar_descarga, screenshot
 from comparar_trabajadores import comparar, guardar_resultado
 from config import DOWNLOAD_DIR
 from bq_asistencia import (
@@ -89,8 +89,12 @@ def _comparar_y_elegibles(listado: Path) -> tuple[list[str], Path]:
 def _descargar_plantilla_vacia(driver, wait) -> Path:
     """Crear trabajadores → Descargar Nueva Plantilla → Descargar Plantilla."""
     logger.info("Descargando plantilla vacía de ingreso…")
-    click_xpath(driver, wait, xp("nav.paso_1"))
-    time.sleep(1)
+    # Si venimos del listado ya estamos en Cargas Masivas (solo menú lateral):
+    # el link superior no existe, así que es opcional.
+    if click_si_existe(driver, wait, xp("nav.paso_1"), timeout=3):
+        time.sleep(1)
+    else:
+        logger.info("nav.paso_1 no visible; ya en Cargas Masivas")
     click_xpath(driver, wait, xp("ingreso.crear_trabajadores"))
     time.sleep(1.2)
     click_xpath(driver, wait, xp("ingreso.descargar_plantilla"))

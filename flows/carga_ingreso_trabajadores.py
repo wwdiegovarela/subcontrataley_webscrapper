@@ -21,8 +21,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from browser import click_xpath, screenshot, subir_archivo
-from config import DOWNLOAD_DIR
+from browser import click_si_existe, click_xpath, screenshot, subir_archivo
+from config import DOWNLOAD_DIR, DRY_RUN
 from flows.llegar_a_plantillas import hacer_login
 from xpaths import xp, xpath_pendiente
 
@@ -217,11 +217,8 @@ def ejecutar(
         _click_carga_masiva(driver, wait)
     else:
         # Pipeline reusa sesión: volver a hub Cargas Masivas
-        try:
-            click_xpath(driver, wait, xp("nav.paso_1"))
+        if click_si_existe(driver, wait, xp("nav.paso_1"), timeout=3):
             time.sleep(1)
-        except Exception:
-            pass
 
     pendiente = _navegar_pasos(driver, wait)
     if pendiente is not None:
@@ -276,6 +273,16 @@ def ejecutar(
     WebDriverWait(driver, 60).until(
         EC.element_to_be_clickable((By.XPATH, xp(btn_key)))
     )
+    if DRY_RUN:
+        screenshot(driver, "ingreso_dry_run_antes_carga_masiva.png")
+        logger.warning(
+            "DRY_RUN activo: botón '%s' encontrado y clickeable, "
+            "pero NO se hace click. No se cargó nada al portal.",
+            btn_key,
+        )
+        time.sleep(min(pausa_exploracion, 30))
+        return excel
+
     click_xpath(driver, wait, xp(btn_key))
     time.sleep(2)
     _aceptar_alerta_si_hay(driver)
