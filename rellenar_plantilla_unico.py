@@ -8,6 +8,7 @@ Por eso las columnas se resuelven por encabezado, no por índice fijo.
 from __future__ import annotations
 
 import logging
+from datetime import date
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,6 +58,7 @@ def rellenar_plantilla_un_documento(
     layout: str = "yyyy_mm",
     periodo_gcs: str | None = None,
     guardar_como: Path | None = None,
+    referencia: date | None = None,
 ) -> ResultadoRellenoUnico:
     """
     Escribe nombre del PDF en 'nombre_de_archivo'.
@@ -64,7 +66,7 @@ def rellenar_plantilla_un_documento(
     No toca columnas de RUT/Nombre ni inventa documento_asociado_*.
     """
     docs_idx, periodo = buscar_docs_tipo(
-        tipo_gcs, periodo=periodo_gcs, layout=layout
+        tipo_gcs, periodo=periodo_gcs, layout=layout, referencia=referencia
     )
     wb = load_workbook(plantilla)
     if HOJA_DOCUMENTOS not in wb.sheetnames:

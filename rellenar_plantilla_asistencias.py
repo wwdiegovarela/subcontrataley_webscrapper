@@ -1,4 +1,9 @@
-"""Rellena plantilla Libro de Asistencia: 1 fila por faena → 1 PDF compilado."""
+"""
+Rellena una plantilla del portal POR FAENA (1 fila por faena → 1 PDF compilado).
+
+Usada por Libro de Asistencia (etiqueta 'Asistencia') y por Pagos Mutualidades /
+Cajas de Compensación (etiqueta propia), con PDFs de compilar_docs_por_faena.
+"""
 
 from __future__ import annotations
 
@@ -42,21 +47,24 @@ def _col(mapa: dict[str, int], *nombres: str) -> int:
     raise KeyError(f"No encontré columna {nombres} en {list(mapa)}")
 
 
-def indice_pdfs_por_faena(pdf_dir: Path, periodo: str) -> dict[str, Path]:
+def indice_pdfs_por_faena(
+    pdf_dir: Path, periodo: str, etiqueta: str = "Asistencia"
+) -> dict[str, Path]:
     """
     Indexa PDFs por slug de faena.
-    Espera nombres: {slug}_Asistencia_{periodo}.pdf
+    Espera nombres: {slug}_{etiqueta}_{periodo}.pdf
     """
     pdf_dir = Path(pdf_dir)
-    suffix = f"_Asistencia_{periodo}.pdf"
+    sep = f"_{etiqueta}_"
+    suffix = f"{sep}{periodo}.pdf"
     out: dict[str, Path] = {}
     for p in sorted(pdf_dir.glob("*.pdf")):
         name = p.name
         if not name.endswith(suffix):
-            # tolerancia: slug_Asistencia_julio 2026.pdf
-            if "_Asistencia_" not in name:
+            # tolerancia: slug_{etiqueta}_julio 2026.pdf
+            if sep not in name:
                 continue
-            slug = name.rsplit("_Asistencia_", 1)[0]
+            slug = name.rsplit(sep, 1)[0]
         else:
             slug = name[: -len(suffix)]
         out[slug] = p
@@ -69,6 +77,7 @@ def rellenar_plantilla_asistencias(
     *,
     periodo: str,
     guardar_como: Path | None = None,
+    etiqueta: str = "Asistencia",
 ) -> ResultadoRellenoAsistencia:
     """
     Escribe en cada fila el nombre del PDF compilado de esa faena.
@@ -76,10 +85,10 @@ def rellenar_plantilla_asistencias(
     """
     plantilla = Path(plantilla)
     pdf_dir = Path(pdf_dir)
-    idx = indice_pdfs_por_faena(pdf_dir, periodo)
+    idx = indice_pdfs_por_faena(pdf_dir, periodo, etiqueta)
     if not idx:
         raise FileNotFoundError(
-            f"No hay PDFs de asistencia en {pdf_dir} para periodo '{periodo}'"
+            f"No hay PDFs '{etiqueta}' en {pdf_dir} para periodo '{periodo}'"
         )
 
     wb = load_workbook(plantilla)
@@ -120,7 +129,8 @@ def rellenar_plantilla_asistencias(
     res.pdfs = list(pdfs_vistos.values())
 
     logger.info(
-        "Plantilla asistencia periodo=%s | filas=%s | pdfs unicos=%s | sin_pdf=%s → %s",
+        "Plantilla por faena (%s) periodo=%s | filas=%s | pdfs unicos=%s | sin_pdf=%s → %s",
+        etiqueta,
         periodo,
         res.filas,
         len(res.pdfs),

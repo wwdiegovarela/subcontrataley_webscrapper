@@ -1,6 +1,9 @@
 """
 Mapea RUT→faena desde plantilla de liquidaciones y compila
-un PDF de asistencias por faena (periodo mes anterior en GCS).
+un PDF por faena (periodo mes anterior en GCS).
+
+Usado por Libro de Asistencia (tipo GCS 'Asistencia') y por las cargas agrupadas
+por faena de Pagos Mutualidades / Cajas de Compensación (tipo GCS 'Cotizaciones').
 """
 
 from __future__ import annotations
@@ -10,6 +13,7 @@ import logging
 import re
 import unicodedata
 from collections import defaultdict
+from datetime import date
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,12 +27,44 @@ from gcs_docs import (
     buscar_docs_tipo,
     descargar_doc,
     periodo_gcs_texto,
+    periodo_gcs_yyyy_mm,
     rut_cuerpo,
 )
 
 logger = logging.getLogger(__name__)
 
 HOJA = "Documentos"
+
+
+@dataclass(frozen=True)
+class FuenteDocsFaena:
+    """
+    De dónde salen los PDF por RUT que se fusionan por faena (parámetro por flujo).
+
+    - tipo_gcs / layout definen la ruta GCS (ver gcs_docs._globs_periodo):
+        mes_anio → Trabajadores/{rut}/{tipo}/{mes año}/*.pdf  (+ legacy **/{tipo}/{mes año}/)
+        yyyy_mm  → Trabajadores/{rut}/{tipo}/{YYYY}/{MM}/*.pdf (+ legacy **/{tipo}/{YYYY}/{MM}/)
+    - RUT del PDF: prefijo del nombre `{rut}[-dv]_...` o carpeta `Trabajadores/{rut}/`
+      (gcs_docs._rut_cuerpo_de_blob). 1 PDF por RUT (gcs_docs.indice_por_rut).
+    - etiqueta: nombre del fusionado `{faena_slug}_{etiqueta}_{periodo}.pdf`.
+    - orden: 'excel' (aparición en la base) o 'rut' (numérico).
+    """
+
+    tipo_gcs: str
+    layout: str
+    etiqueta: str
+    orden: str = "excel"
+    staging_nombre: str = "staging_asistencias"
+
+    def patron_gcs(self, periodo: str, anio: str = "{YYYY}", mes: str = "{MM}") -> str:
+        if self.layout == "yyyy_mm":
+            return f"Trabajadores/{{rut}}/{self.tipo_gcs}/{anio}/{mes}/*.pdf"
+        return f"Trabajadores/{{rut}}/{self.tipo_gcs}/{periodo}/*.pdf"
+
+
+FUENTE_ASISTENCIA = FuenteDocsFaena(
+    tipo_gcs="Asistencia", layout="mes_anio", etiqueta="Asistencia", orden="excel"
+)
 
 
 @dataclass
@@ -107,18 +143,53 @@ def compilar_asistencias_por_faena(
     periodo: str | None = None,
     staging: Path | None = None,
 ) -> ResultadoCompilacion:
+    """Libro de Asistencia: 1 PDF por faena con las asistencias de sus RUT."""
+    return compilar_docs_por_faena(
+        plantilla, FUENTE_ASISTENCIA, periodo=periodo, staging=staging
+    )
+
+
+def compilar_docs_por_faena(
+    plantilla: Path,
+    fuente: FuenteDocsFaena,
+    *,
+    periodo: str | None = None,
+    staging: Path | None = None,
+    referencia: date | None = None,
+) -> ResultadoCompilacion:
+    """
+    Agrupa los RUT de la plantilla de liquidaciones (base) por columna 'faena' y
+    fusiona el PDF GCS de cada RUT (según `fuente`) en un único PDF por faena:
+    `{slug_faena}_{fuente.etiqueta}_{periodo}.pdf` en `staging/por_faena`.
+    Los RUT sin PDF quedan en resultado.sin_pdf[faena] (log + resumen JSON).
+    """
     plantilla = Path(plantilla)
     periodo = periodo or periodo_gcs_texto()
     por_faena = leer_ruts_por_faena(plantilla)
 
-    idx, periodo_res = buscar_docs_tipo("Asistencia", periodo=periodo)
+    idx, periodo_res = buscar_docs_tipo(
+        fuente.tipo_gcs, periodo=periodo, layout=fuente.layout, referencia=referencia
+    )
     if periodo_res != periodo:
         logger.info("Periodo GCS resuelto: %s", periodo_res)
         periodo = periodo_res
+    if fuente.layout == "yyyy_mm":
+        _, _anio, _mes = periodo_gcs_yyyy_mm(referencia)
+        patron = fuente.patron_gcs(periodo, _anio, _mes)
+    else:
+        patron = fuente.patron_gcs(periodo)
+    logger.info(
+        "Fuente por faena: tipo=%s ruta=%s | RUT=prefijo nombre o carpeta | "
+        "%s RUT con PDF en GCS | orden=%s | salida=*_%s_%s.pdf",
+        fuente.tipo_gcs, patron, len(idx), fuente.orden, fuente.etiqueta, periodo,
+    )
+    etiqueta = fuente.etiqueta
+    orden = fuente.orden
+    staging_nombre = fuente.staging_nombre
 
     staging = Path(
         staging
-        or DOWNLOAD_DIR / "staging_asistencias" / periodo.replace(" ", "_")
+        or DOWNLOAD_DIR / staging_nombre / periodo.replace(" ", "_")
     )
     staging.mkdir(parents=True, exist_ok=True)
     raw_dir = staging / "_raw"
@@ -127,6 +198,9 @@ def compilar_asistencias_por_faena(
 
     mapa = {
         "periodo": periodo,
+        "tipo_gcs": fuente.tipo_gcs,
+        "ruta_gcs": patron,
+        "orden": fuente.orden,
         "plantilla": str(plantilla.resolve()),
         "total_faenas": len(por_faena),
         "total_ruts": sum(len(v) for v in por_faena.values()),
@@ -153,6 +227,8 @@ def compilar_asistencias_por_faena(
     )
 
     for faena, ruts in por_faena.items():
+        if orden == "rut":
+            ruts = sorted(ruts, key=lambda r: (len(r), r))
         docs: list[DocGCS] = []
         faltan: list[str] = []
         for cuerpo in ruts:
@@ -174,10 +250,10 @@ def compilar_asistencias_por_faena(
             logger.warning("[%s] sin PDFs — no se genera compilado", faena)
             continue
 
-        paths = [descargar_doc(d, raw_dir) for d in docs]
-        # orden estable = orden del Excel
+        # Subcarpeta por RUT: evita colisiones si dos RUT tienen el mismo nombre de archivo
+        paths = [descargar_doc(d, raw_dir / (d.rut_cuerpo or "_sin_rut")) for d in docs]
         slug = _slug_faena(faena)
-        dest = out_dir / f"{slug}_Asistencia_{periodo}.pdf"
+        dest = out_dir / f"{slug}_{etiqueta}_{periodo}.pdf"
         fusionar_pdfs(paths, dest)
         resultado.pdfs[faena] = dest
         logger.info(

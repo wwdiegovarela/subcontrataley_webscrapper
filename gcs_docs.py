@@ -117,6 +117,45 @@ def _es_ruta_trabajadores(ruta: str) -> bool:
     return str(ruta).startswith(f"{RAIZ_TRABAJADORES}/")
 
 
+def periodo_cotizaciones(
+    hoy: date | None = None,
+    *,
+    override: str | None = None,
+    dia_disponible: int | None = None,
+) -> date:
+    """
+    Mes (día 1) de cotizaciones a cargar por defecto.
+
+    La cotización del mes M está disponible desde el día `dia_disponible` (env
+    COTIZACIONES_DIA_DISPONIBLE, default 14) de M+1, hora America/Santiago:
+    hoy >= día → M-1 ; hoy < día → M-2.
+    `override` (o env COTIZACIONES_PERIODO) "YYYY-MM" fija el periodo explícito.
+    """
+    import config as _cfg
+
+    ov = override if override is not None else _cfg.COTIZACIONES_PERIODO
+    if ov:
+        m = re.fullmatch(r"\s*(\d{4})-(\d{1,2})\s*", ov)
+        if not m or not 1 <= int(m.group(2)) <= 12:
+            raise ValueError(f"COTIZACIONES_PERIODO inválido (esperado YYYY-MM): {ov!r}")
+        return date(int(m.group(1)), int(m.group(2)), 1)
+    if hoy is None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        hoy = datetime.now(ZoneInfo("America/Santiago")).date()
+    dia = _cfg.COTIZACIONES_DIA_DISPONIBLE if dia_disponible is None else dia_disponible
+    atras = 1 if hoy.day >= dia else 2
+    idx = hoy.year * 12 + (hoy.month - 1) - atras
+    return date(idx // 12, idx % 12 + 1, 1)
+
+
+def referencia_para_periodo(periodo: date) -> date:
+    """Fecha cuya 'mes anterior' es `periodo` (para APIs basadas en mes_anterior)."""
+    idx = periodo.year * 12 + (periodo.month - 1) + 1
+    return date(idx // 12, idx % 12 + 1, 1)
+
+
 def periodo_gcs_yyyy_mm(referencia: date | None = None) -> tuple[str, str, str]:
     """
     Periodo mes anterior como (texto 'junio 2026', '2026', '06').

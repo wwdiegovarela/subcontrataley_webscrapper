@@ -5,9 +5,9 @@ from __future__ import annotations
 import logging
 import time
 
-from browser import click_xpath, screenshot
+from browser import click_xpath, screenshot, xpk
 from flows.llegar_a_plantillas import llegar_a_cargar_plantillas
-from xpaths import xp, xpath_pendiente
+from xpaths import xpath_pendiente
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def ejecutar_hasta_plantilla(
         return False
 
     logger.info("Seleccionando plantilla: %s", nombre)
-    click_xpath(driver, wait, xp(plantilla_key))
+    click_xpath(driver, wait, xpk(driver, plantilla_key))
     time.sleep(1)
     screenshot(driver, f"plantilla_{plantilla_key.replace('.', '_')}.png")
     return True

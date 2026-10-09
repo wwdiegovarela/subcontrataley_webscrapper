@@ -20,10 +20,10 @@ import time
 from datetime import date
 from pathlib import Path
 
-from browser import click_xpath, click_y_esperar_descarga, screenshot
+from browser import click_xpath, click_y_esperar_descarga, screenshot, xpk
 from config import DOWNLOAD_DIR
 from flows.llegar_a_plantillas import hacer_login
-from xpaths import xp, xpath_pendiente
+from xpaths import xpath_pendiente
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ def navegar_hasta_export(driver, wait) -> str | None:
             return key
 
         logger.info("Click: %s", key)
-        click_xpath(driver, wait, xp(key))
+        click_xpath(driver, wait, xpk(driver, key))
         time.sleep(1)
         screenshot(driver, f"{key.replace('.', '_')}.png")
 
@@ -93,7 +93,7 @@ def navegar_hasta_export(driver, wait) -> str | None:
 def _click_carga_masiva(driver, wait) -> None:
     """Mismo primer click del menú que liquidaciones / libro asistencia / pagos."""
     logger.info("Nav Carga Masiva (nav.paso_1)")
-    click_xpath(driver, wait, xp("nav.paso_1"))
+    click_xpath(driver, wait, xpk(driver, "nav.paso_1"))
     time.sleep(1)
     screenshot(driver, "trabajadores_carga_masiva.png")
 
@@ -139,11 +139,12 @@ def ejecutar(driver, wait, *, pausa_exploracion: float = 180, ya_logueado: bool 
         time.sleep(pausa_exploracion)
         return None
 
+    # Descarga read-only: se ejecuta también con DRY_RUN (no carga datos al portal).
     logger.info("Descargando listado (glob=%s)…", GLOB_LISTADO)
     plantilla = click_y_esperar_descarga(
         driver,
         wait,
-        xp(key_export),
+        xpk(driver, key_export),
         glob_pat=GLOB_LISTADO,
         timeout=90,
     )

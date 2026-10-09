@@ -17,6 +17,7 @@ import logging
 import time
 
 from browser import iniciar_navegador, screenshot
+from config import DRY_RUN
 from flows import FLUJOS_CARGA
 
 logging.basicConfig(
@@ -46,7 +47,7 @@ def main() -> None:
         return
 
     nombre, ejecutar = FLUJOS_CARGA[args.flujo]
-    logger.info("Iniciando flujo: %s (%s)", nombre, args.flujo)
+    logger.info("Iniciando flujo: %s (%s) DRY_RUN=%s", nombre, args.flujo, DRY_RUN)
 
     driver, wait = iniciar_navegador(headless=False)
     try:

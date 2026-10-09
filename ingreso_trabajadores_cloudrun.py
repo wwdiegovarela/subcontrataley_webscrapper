@@ -29,7 +29,7 @@ import time
 import traceback
 
 from browser import iniciar_navegador, screenshot
-from config import DOWNLOAD_DIR, HEADLESS, IS_CLOUD_RUN, require_credentials
+from config import DRY_RUN, DOWNLOAD_DIR, HEADLESS, IS_CLOUD_RUN, mascarar, require_credentials
 from flows.pipeline_ingreso_trabajadores import ejecutar
 
 logging.basicConfig(
@@ -48,7 +48,8 @@ def main() -> int:
         DOWNLOAD_DIR,
     )
     user, _ = require_credentials()
-    logger.info("Usuario portal: %s", user)
+    logger.info("DRY_RUN=%s (true = no sube archivos ni confirma cargas)", DRY_RUN)
+    logger.info("Usuario portal: %s", mascarar(user))
 
     driver = None
     try:

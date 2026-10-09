@@ -113,6 +113,22 @@ python run_flujo.py --list
 python run_flujo.py liquidaciones
 ```
 
+## Cargas agrupadas por faena
+
+Libro de Asistencia, Pagos Mutualidades y Pagos Cajas de Compensación usan una
+plantilla del portal **por faena** (sin columna RUT). Pipeline común
+(`compilar_asistencias.compilar_docs_por_faena(base, FuenteDocsFaena)` + `rellenar_plantilla_asistencias(..., etiqueta=)`; la fuente GCS se parametriza por flujo: `FUENTE_ASISTENCIA` y `pagos_config.fuente_por_faena(cfg)`):
+
+1. Descargar la plantilla de **Liquidaciones de Sueldo** (base: RUT → faena).
+2. Por faena, bajar de GCS el PDF de cada RUT y fusionarlos en 1 PDF:
+   `{faena_slug}_{Etiqueta}_{mes año}.pdf`
+   - Libro de Asistencia: `Trabajadores/{rut}/Asistencia/{mes año}/` (orden del Excel), etiqueta `Asistencia`.
+   - Mutualidades / Cajas: `Trabajadores/{rut}/Cotizaciones/{YYYY}/{MM}/` (orden por RUT),
+     etiquetas `Mutualidades` / `CajasCompensacion`.
+3. Descargar la plantilla propia (por faena) y escribir el PDF en `nombre_de_archivo`
+   de la fila de esa faena. RUT sin PDF → `resumen_compilacion.json` y log.
+4. Subir Excel + PDFs (respeta `DRY_RUN`).
+
 ## GCS — Tres raíces (lectura)
 
 Los flujos que bajan PDFs (`liquidaciones`, `libro_asistencia`, pagos) leen el bucket

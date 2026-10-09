@@ -24,6 +24,7 @@ sa-*.json
 # Descargas / debug locales
 downloads/
 debug/
+_respaldo_antes_*/
 Descargas/
 output/
 tmp/

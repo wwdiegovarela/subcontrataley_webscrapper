@@ -20,7 +20,14 @@ import time
 from datetime import date
 from pathlib import Path
 
-from browser import click_si_existe, click_xpath, click_y_esperar_descarga, screenshot
+from browser import (
+    click_clave_si_existe,
+    click_xpath,
+    click_y_esperar_descarga,
+    dry_run,
+    screenshot,
+    xpk,
+)
 from comparar_trabajadores import comparar, guardar_resultado
 from config import DOWNLOAD_DIR
 from bq_asistencia import (
@@ -34,7 +41,6 @@ from flows import carga_ingreso_trabajadores
 from flows import descargar_listado_trabajadores as dl_listado
 from leer_listado_trabajadores import leer_listado_trabajadores
 from rellenar_plantilla_trabajadores import construir_filas, escribir_plantilla
-from xpaths import xp
 
 logger = logging.getLogger(__name__)
 
@@ -91,19 +97,19 @@ def _descargar_plantilla_vacia(driver, wait) -> Path:
     logger.info("Descargando plantilla vacía de ingreso…")
     # Si venimos del listado ya estamos en Cargas Masivas (solo menú lateral):
     # el link superior no existe, así que es opcional.
-    if click_si_existe(driver, wait, xp("nav.paso_1"), timeout=3):
+    if click_clave_si_existe(driver, wait, "nav.paso_1", timeout=3):
         time.sleep(1)
     else:
         logger.info("nav.paso_1 no visible; ya en Cargas Masivas")
-    click_xpath(driver, wait, xp("ingreso.crear_trabajadores"))
+    click_xpath(driver, wait, xpk(driver, "ingreso.crear_trabajadores"))
     time.sleep(1.2)
-    click_xpath(driver, wait, xp("ingreso.descargar_plantilla"))
+    click_xpath(driver, wait, xpk(driver, "ingreso.descargar_plantilla"))
     time.sleep(1.2)
     screenshot(driver, "ingreso_descarga_plantilla.png")
     descargado = click_y_esperar_descarga(
         driver,
         wait,
-        xp("ingreso.btn_descargar_plantilla"),
+        xpk(driver, "ingreso.btn_descargar_plantilla"),
         glob_pat="*.xlsx",
         timeout=120,
     )
@@ -134,7 +140,13 @@ def ejecutar(driver, wait) -> Path | None:
     Returns:
         Path del Excel cargado, o None si no hay elegibles / fallo.
     """
-    logger.info("=== %s: inicio ===", NOMBRE)
+    logger.info("=== %s: inicio (DRY_RUN=%s) ===", NOMBRE, dry_run())
+    if dry_run():
+        logger.warning(
+            "[DRY_RUN] Pipeline: lecturas (portal/BQ/CR/GCS) y escrituras LOCALES se "
+            "ejecutan; la carga al portal (subir Excel / Validar / Carga Masiva) se omite. "
+            "Este pipeline no escribe en GCS ni BigQuery."
+        )
 
     # 1) Listado SCL
     listado = dl_listado.ejecutar(driver, wait, pausa_exploracion=0)
@@ -163,5 +175,8 @@ def ejecutar(driver, wait) -> Path | None:
     )
     if cargado is None:
         raise RuntimeError("Fallo en validación/carga masiva de ingreso")
-    logger.info("=== %s: OK excel=%s ===", NOMBRE, cargado)
+    logger.info(
+        "=== %s: %s excel=%s ===", NOMBRE,
+        "DRY_RUN (nada cargado)" if dry_run() else "OK", cargado,
+    )
     return cargado

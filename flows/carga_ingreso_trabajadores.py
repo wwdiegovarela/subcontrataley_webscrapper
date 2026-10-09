@@ -21,10 +21,18 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from browser import click_si_existe, click_xpath, screenshot, subir_archivo
-from config import DOWNLOAD_DIR, DRY_RUN
+from browser import (
+    click_clave_si_existe,
+    click_mutante,
+    click_xpath,
+    dry_run,
+    enviar_archivos,
+    screenshot,
+    xpk,
+)
+from config import DOWNLOAD_DIR
 from flows.llegar_a_plantillas import hacer_login
-from xpaths import xp, xpath_pendiente
+from xpaths import xpath_pendiente
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +73,7 @@ def _resolver_plantilla(path: Path | None = None) -> Path:
 
 def _click_carga_masiva(driver, wait) -> None:
     logger.info("Nav Carga Masiva (nav.paso_1)")
-    click_xpath(driver, wait, xp("nav.paso_1"))
+    click_xpath(driver, wait, xpk(driver, "nav.paso_1"))
     time.sleep(1)
     screenshot(driver, "ingreso_carga_masiva.png")
 
@@ -84,7 +92,7 @@ def _navegar_pasos(driver, wait) -> str | None:
             screenshot(driver, f"pendiente_{key.replace('.', '_')}.png")
             return key
         logger.info("Click: %s", key)
-        click_xpath(driver, wait, xp(key))
+        click_xpath(driver, wait, xpk(driver, key))
         time.sleep(1.2)
         screenshot(driver, f"{key.replace('.', '_')}.png")
     return None
@@ -217,7 +225,7 @@ def ejecutar(
         _click_carga_masiva(driver, wait)
     else:
         # Pipeline reusa sesión: volver a hub Cargas Masivas
-        if click_si_existe(driver, wait, xp("nav.paso_1"), timeout=3):
+        if click_clave_si_existe(driver, wait, "nav.paso_1", timeout=3):
             time.sleep(1)
 
     pendiente = _navegar_pasos(driver, wait)
@@ -237,7 +245,7 @@ def ejecutar(
         return None
 
     logger.info("Subiendo Excel a la zona de carga…")
-    subir_archivo(driver, wait, xp("ingreso.input_excel"), excel)
+    enviar_archivos(driver, wait, "ingreso.input_excel", [excel])
     time.sleep(1.5)
     _aceptar_alerta_si_hay(driver)
     screenshot(driver, "ingreso_excel_cargado.png")
@@ -249,7 +257,22 @@ def ejecutar(
         return None
 
     logger.info("Validar Plantilla")
-    click_xpath(driver, wait, xp("ingreso.btn_enviar"))
+    click_mutante(
+        driver, wait, "ingreso.btn_enviar",
+        "click 'Validar Plantilla' (envía el Excel al portal)",
+    )
+    if dry_run():
+        # Sin Excel ni validación real: verificar el botón final y terminar.
+        click_mutante(
+            driver, wait, "ingreso.btn_realizar_carga_masiva",
+            "click 'Realizar Carga Masiva' (crea trabajadores/contratos)",
+        )
+        logger.warning(
+            "[DRY_RUN] se omitiría: esperar fin de carga masiva. "
+            "No se cargó nada al portal. excel=%s", excel,
+        )
+        screenshot(driver, "ingreso_dry_run_fin.png")
+        return excel
     time.sleep(3)
     _aceptar_alerta_si_hay(driver)
     screenshot(driver, "ingreso_despues_enviar.png")
@@ -271,19 +294,14 @@ def ejecutar(
         return None
 
     WebDriverWait(driver, 60).until(
-        EC.element_to_be_clickable((By.XPATH, xp(btn_key)))
-    )
-    if DRY_RUN:
-        screenshot(driver, "ingreso_dry_run_antes_carga_masiva.png")
-        logger.warning(
-            "DRY_RUN activo: botón '%s' encontrado y clickeable, "
-            "pero NO se hace click. No se cargó nada al portal.",
-            btn_key,
+        EC.element_to_be_clickable(
+            (By.XPATH, xpk(driver, btn_key, timeout=60))
         )
-        time.sleep(min(pausa_exploracion, 30))
-        return excel
-
-    click_xpath(driver, wait, xp(btn_key))
+    )
+    click_mutante(
+        driver, wait, btn_key,
+        "click 'Realizar Carga Masiva' (crea trabajadores/contratos)",
+    )
     time.sleep(2)
     _aceptar_alerta_si_hay(driver)
     screenshot(driver, "ingreso_despues_carga_masiva.png")

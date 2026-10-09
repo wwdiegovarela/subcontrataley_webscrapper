@@ -19,7 +19,13 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select, WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import (
+    InvalidSelectorException,
+    StaleElementReferenceException,
+    TimeoutException,
+)
 
+import config as _config
 from config import (
     CHROME_BIN,
     CHROMEDRIVER_PATH,
@@ -32,6 +38,11 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# remote_connection en DEBUG vuelca el payload de cada comando (incluye el texto
+# de send_keys = credenciales). Nunca dejarlo bajar de INFO.
+for _ruidoso in ("selenium.webdriver.remote.remote_connection", "urllib3.connectionpool"):
+    logging.getLogger(_ruidoso).setLevel(max(logging.INFO, logging.getLogger(_ruidoso).level))
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -156,7 +167,232 @@ def iniciar_navegador(
     return driver, wait
 
 
+def _es_visible(el) -> bool:
+    try:
+        return el.is_displayed()
+    except StaleElementReferenceException:
+        return False
+
+
+def resolver_selector(
+    driver,
+    key: str,
+    *,
+    timeout: float | None = None,
+    visible: bool = True,
+    obligatorio: bool = True,
+):
+    """
+    Resuelve una clave de xpaths.py probando sus candidatos EN ORDEN.
+
+    Gana el primer candidato con exactamente 1 match (visible si visible=True).
+    Candidatos con 0 o >1 matches se saltan (ambigüedad = no confiable).
+    Reintenta hasta `timeout` (actúa como espera por condición).
+
+    Returns:
+        (elemento, xpath_resuelto). xpath_resuelto identifica ese único nodo
+        (si el candidato tenía nodos ocultos extra se indexa: "(xp)[n]"),
+        así sirve para los helpers existentes que reciben XPath.
+        Con obligatorio=False devuelve (None, None) si no resolvió.
+    """
+    from xpaths import candidatos
+
+    cands = candidatos(key)
+    limite = EXPLICIT_WAIT if timeout is None else timeout
+    deadline = time.time() + limite
+    driver.implicitly_wait(0)  # el implicit wait multiplicaría el tiempo por candidato
+    diag: list[str] = []
+    try:
+        while True:
+            diag = []
+            for i, cand in enumerate(cands):
+                try:
+                    els = driver.find_elements(By.XPATH, cand)
+                except InvalidSelectorException:
+                    diag.append(f"#{i}:xpath-invalido")
+                    continue
+                if visible:
+                    sel = [(j, e) for j, e in enumerate(els) if _es_visible(e)]
+                else:
+                    sel = list(enumerate(els))
+                diag.append(f"#{i}:{len(sel)}/{len(els)}")
+                if len(sel) != 1:
+                    continue
+                j, el = sel[0]
+                xp_final = cand if len(els) == 1 else f"({cand})[{j + 1}]"
+                if i > 0:
+                    # Carrera: el DOM pudo insertarse entre consultas. Re-probar
+                    # los candidatos previos antes de declarar drift.
+                    for i2, c2 in enumerate(cands[:i]):
+                        try:
+                            e2 = driver.find_elements(By.XPATH, c2)
+                        except InvalidSelectorException:
+                            continue
+                        s2 = [(j2, x) for j2, x in enumerate(e2) if (not visible or _es_visible(x))]
+                        if len(s2) == 1 and s2[0][1] == el:
+                            i, cand = i2, c2
+                            xp_final = c2 if len(e2) == 1 else f"({c2})[{s2[0][0] + 1}]"
+                            break
+                if i == 0:
+                    logger.debug("Selector '%s' → candidato #0", key)
+                else:
+                    logger.warning(
+                        "Selector '%s': candidato #0 falló; usado respaldo #%s/%s "
+                        "(%s). Revisar xpaths.py (drift del portal). diag=%s",
+                        key, i, len(cands) - 1, cand, " ".join(diag),
+                    )
+                return el, xp_final
+            if time.time() >= deadline:
+                break
+            time.sleep(0.25)
+    finally:
+        driver.implicitly_wait(IMPLICIT_WAIT)
+
+    msg = (
+        f"Selector '{key}' sin match único tras {limite:.0f}s "
+        f"(visible={visible}). matches visibles/total por candidato: {' '.join(diag)}"
+    )
+    if obligatorio:
+        raise TimeoutException(msg)
+    logger.info(msg)
+    return None, None
+
+
+def xpk(driver, key: str, **kwargs) -> str:
+    """XPath resuelto (único) de una clave; drop-in para helpers que reciben XPath."""
+    return resolver_selector(driver, key, **kwargs)[1]
+
+
+def click_clave(driver, wait: WebDriverWait, key: str, **kwargs) -> None:
+    """Resuelve la clave (espera hasta match único visible) y hace click."""
+    click_xpath(driver, wait, xpk(driver, key, **kwargs))
+
+
+def click_clave_si_existe(
+    driver, wait: WebDriverWait, key: str, timeout: float = 5
+) -> bool:
+    """Como click_si_existe, pero resolviendo candidatos de la clave."""
+    _, xp_res = resolver_selector(driver, key, timeout=timeout, obligatorio=False)
+    if not xp_res:
+        return False
+    return click_si_existe(driver, wait, xp_res, timeout=max(timeout, 1))
+
+
+# ---------------------------------------------------------------------------
+# DRY_RUN: guardas centrales para acciones que cargan/modifican datos en el portal
+# ---------------------------------------------------------------------------
+def dry_run() -> bool:
+    """Lee config.DRY_RUN en tiempo de ejecución (default false = producción)."""
+    return bool(getattr(_config, "DRY_RUN", False))
+
+
+def _estado_elemento(driver, el) -> str:
+    try:
+        vis = el.is_displayed()
+        hab = el.is_enabled() and el.get_attribute("disabled") is None
+        return f"presente, {'visible' if vis else 'oculto'}, {'habilitado' if hab else 'deshabilitado'}"
+    except StaleElementReferenceException:
+        return "presente (stale)"
+
+
+def _dry_run_destino_archivos(driver, xpath: str, paths: list[Path]) -> None:
+    """Verifica que el destino (input file / dropzone) exista, SIN enviar nada."""
+    estado = "no presente"
+    try:
+        driver.implicitly_wait(0)
+        els = driver.find_elements(By.XPATH, xpath)
+        if els:
+            estado = _estado_elemento(driver, els[0])
+            if not (els[0].tag_name.lower() == "input"
+                    and (els[0].get_attribute("type") or "").lower() == "file"):
+                tiene = driver.execute_script(
+                    "const r=(arguments[0].closest&&arguments[0].closest('.dropzone'))||arguments[0];"
+                    "return !!(r.dropzone&&r.dropzone.hiddenFileInput) || "
+                    "!!r.querySelector('input[type=file]');",
+                    els[0],
+                )
+                estado += f", input file asociado={'sí' if tiene else 'no'}"
+    except Exception as exc:  # solo diagnóstico
+        estado = f"no verificable ({type(exc).__name__})"
+    finally:
+        driver.implicitly_wait(IMPLICIT_WAIT)
+    nombres = ", ".join(p.name for p in paths[:5]) + (" …" if len(paths) > 5 else "")
+    logger.warning(
+        "[DRY_RUN] se omitiría: enviar %s archivo(s) [%s] a %s (destino: %s)",
+        len(paths), nombres, xpath, estado,
+    )
+
+
+def enviar_archivos(
+    driver,
+    wait: WebDriverWait,
+    key: str,
+    rutas: list[Path],
+    *,
+    multiples: bool = False,
+    **kwargs,
+) -> bool:
+    """
+    Envía archivos al input/dropzone de `key` (resuelto con fallbacks).
+    DRY_RUN: verifica el destino y NO envía nada. Devuelve True si envió.
+    """
+    paths = [Path(p).resolve() for p in rutas]
+    if dry_run():
+        el, xp_res = resolver_selector(
+            driver, key, visible=False, timeout=5, obligatorio=False
+        )
+        if el is None:
+            logger.warning(
+                "[DRY_RUN] se omitiría: enviar %s archivo(s) a '%s' (destino ausente: "
+                "aparece solo tras un paso de carga omitido)", len(paths), key,
+            )
+            return False
+        _dry_run_destino_archivos(driver, xp_res, paths)
+        return False
+    xp_res = xpk(driver, key, visible=False)
+    if multiples:
+        subir_archivos(driver, wait, xp_res, paths, **kwargs)
+    else:
+        for p in paths:
+            subir_archivo(driver, wait, xp_res, p)
+    return True
+
+
+def click_mutante(
+    driver,
+    wait: WebDriverWait,
+    key: str,
+    accion: str,
+    *,
+    timeout: float | None = None,
+    timeout_verificacion: float = 5,
+) -> bool:
+    """
+    Click en un botón que carga/valida/confirma datos en el portal.
+    DRY_RUN: verifica presencia/estado (resolver) y NO hace click. Devuelve True si clickeó.
+    """
+    if dry_run():
+        el, _ = resolver_selector(
+            driver, key, timeout=timeout_verificacion, obligatorio=False
+        )
+        if el is None:
+            el_any, _ = resolver_selector(
+                driver, key, visible=False, timeout=0, obligatorio=False
+            )
+            estado = (
+                f"existe pero {_estado_elemento(driver, el_any)}" if el_any is not None
+                else "ausente (aparece solo tras un paso de carga omitido)"
+            )
+        else:
+            estado = _estado_elemento(driver, el)
+        logger.warning("[DRY_RUN] se omitiría: %s ('%s'; %s)", accion, key, estado)
+        return False
+    click_xpath(driver, wait, xpk(driver, key, timeout=timeout))
+    return True
+
+
 def escribir_xpath(driver, wait: WebDriverWait, xpath: str, texto: str) -> None:
+    """Escribe en un input. Nunca loguea `texto` (puede ser credencial)."""
     el = wait.until(EC.visibility_of_element_located((By.XPATH, xpath)))
     el.clear()
     el.send_keys(texto)
@@ -263,6 +499,12 @@ def esperar_zona_documentos_habilitada(
     Tras 'Cargar Excel', espera a que la zona de documentos acepte PDFs.
     Considera dropzone.hiddenFileInput y ausencia del bloqueo 'SUBA SU PLANTILLA…'.
     """
+    if dry_run():
+        logger.warning(
+            "[DRY_RUN] se omitiría: esperar habilitación de la zona de documentos "
+            "(solo ocurre tras 'Cargar Excel', que no se ejecutó)"
+        )
+        return
     t0 = time.time()
     last_log = 0.0
     while time.time() - t0 < timeout:
@@ -309,6 +551,9 @@ def subir_archivo(driver, wait: WebDriverWait, xpath: str, ruta: Path) -> None:
     path = Path(ruta).resolve()
     if not path.exists():
         raise FileNotFoundError(path)
+    if dry_run():
+        _dry_run_destino_archivos(driver, xpath, [path])
+        return
     inp = _resolver_input_archivo(driver, wait, xpath)
     inp.send_keys(str(path))
     logger.info("Archivo enviado: %s", path.name)
@@ -462,6 +707,9 @@ def subir_archivos(
     if not paths:
         logger.warning("sin archivos para subir en %s", xpath)
         return
+    if dry_run():
+        _dry_run_destino_archivos(driver, xpath, paths)
+        return
 
     base = int((_estado_zona_upload(driver, xpath) or {}).get("items") or 0)
 
@@ -556,21 +804,39 @@ def _select_el(wait: WebDriverWait, xpath: str) -> Select:
     return Select(el)
 
 
-def seleccionar_por_texto(driver, wait: WebDriverWait, xpath: str, texto: str) -> str:
-    """Elige una opción de <select> por texto visible (match exacto o contenido)."""
-    el = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
-    select = Select(el)
+def seleccionar_por_texto(
+    driver, wait: WebDriverWait, xpath: str, texto: str, timeout: float | None = None
+) -> str:
+    """
+    Elige una opción de <select> por texto visible (match exacto o contenido).
+
+    Espera (por condición, hasta `timeout`/EXPLICIT_WAIT) a que la opción exista:
+    el portal llena las opciones por AJAX después de mostrar el formulario y
+    antes se fallaba con "Opciones: ['Seleccione']".
+    """
     objetivo = _norm(texto)
-    for opt in select.options:
-        label = (opt.text or "").strip()
-        if not label:
-            continue
-        if _norm(label) == objetivo or objetivo in _norm(label):
-            select.select_by_visible_text(opt.text)
-            disparar_change(driver, el)
-            logger.info("Select %s → '%s'", xpath, opt.text.strip())
-            return opt.text.strip()
-    disponibles = [o.text.strip() for o in select.options if o.text.strip()]
+    limite = time.time() + (EXPLICIT_WAIT if timeout is None else timeout)
+    disponibles: list[str] = []
+    while True:
+        try:
+            el = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+            select = Select(el)
+            disponibles = []
+            for opt in select.options:
+                label = (opt.text or "").strip()
+                if not label:
+                    continue
+                disponibles.append(label)
+                if _norm(label) == objetivo or objetivo in _norm(label):
+                    select.select_by_visible_text(opt.text)
+                    disparar_change(driver, el)
+                    logger.info("Select %s → '%s'", xpath, opt.text.strip())
+                    return opt.text.strip()
+        except StaleElementReferenceException:
+            pass  # el portal re-renderizó el select; reintentar
+        if time.time() >= limite:
+            break
+        time.sleep(0.3)
     raise ValueError(
         f"No encontré '{texto}' en select {xpath}. Opciones: {disponibles}"
     )
@@ -697,10 +963,14 @@ def seleccionar_periodo_mes_anterior(
     wait: WebDriverWait,
     xpath: str,
     referencia: date | None = None,
+    *,
+    estricto: bool = False,
 ) -> str:
     """
     Elige el periodo del mes anterior a la ejecución.
-    Si no hay match de texto, usa la última opción disponible del select.
+    Si no hay match de texto, usa la última opción disponible del select
+    (o, con estricto=True, falla listando las opciones: evita cargar documentos
+    de un periodo en la plantilla de otro).
     """
     ref = referencia or date.today()
     periodo = mes_anterior(ref)
@@ -724,6 +994,11 @@ def seleccionar_periodo_mes_anterior(
             )
             break
 
+    if elegido is None and estricto:
+        raise ValueError(
+            f"El portal no ofrece el periodo {periodo.year:04d}-{periodo.month:02d} "
+            f"en {xpath}; opciones: {[o.text.strip() for o in utiles]}"
+        )
     if elegido is None:
         opt = utiles[-1]
         select.select_by_visible_text(opt.text)

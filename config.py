@@ -22,7 +22,9 @@ HEADLESS = os.getenv(
     "true" if IS_CLOUD_RUN else "false",
 ).lower() in ("1", "true", "yes")
 
-# DRY_RUN: recorre todo el flujo pero NO dispara la carga final al portal.
+# DRY_RUN=true: recorre todo el flujo y verifica los elementos, pero NO envía archivos
+# a inputs/dropzones ni hace click en botones que cargan/validan/confirman (ver
+# browser.enviar_archivos / click_mutante; log "[DRY_RUN] se omitiría: ...").
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
 
 IMPLICIT_WAIT = int(os.getenv("IMPLICIT_WAIT", "10"))
@@ -53,6 +55,13 @@ GCS_BUCKET_NAME = os.getenv("GCS_BUCKET_NAME", "worldwide-documentos-instalacion
 # Local: JSON. Cloud Run: SA del job (ADC) si no se define path.
 GCS_CREDENTIALS_PATH = os.getenv("GCS_CREDENTIALS_PATH", "").strip() or None
 
+# Cotizaciones (Previred): la del mes M está disponible desde el día N de M+1
+# (America/Santiago). Periodo por defecto = M-1 si hoy >= N, si no M-2.
+# Mismo criterio que el scraper de cotizaciones ControlRoll y el auditor.
+COTIZACIONES_DIA_DISPONIBLE = int(os.getenv("COTIZACIONES_DIA_DISPONIBLE", "14"))
+# Override explícito del periodo de cotizaciones: "YYYY-MM" (vacío = regla del día N).
+COTIZACIONES_PERIODO = os.getenv("COTIZACIONES_PERIODO", "").strip() or None
+
 # Chrome en contenedor (Dockerfile)
 CHROME_BIN = os.getenv("CHROME_BIN", "").strip() or None
 CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "").strip() or None
@@ -67,3 +76,14 @@ def require_credentials() -> tuple[str, str]:
             "SUBCONTRATALEY_PASSWORD en .env o en el Job de Cloud Run."
         )
     return user, password
+
+
+def mascarar(valor: str | None, visibles: int = 2) -> str:
+    """Enmascara un dato sensible para logs (usuario/RUT): 'ab*******'.
+    Nunca usar para contraseñas: esas no se loguean en absoluto."""
+    v = (valor or "").strip()
+    if not v:
+        return "<vacío>"
+    if len(v) <= visibles:
+        return "*" * len(v)
+    return v[:visibles] + "*" * (len(v) - visibles)

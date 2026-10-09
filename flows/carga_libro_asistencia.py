@@ -14,6 +14,10 @@ import time
 from pathlib import Path
 
 from browser import (
+    click_mutante,
+    dry_run,
+    enviar_archivos,
+    xpk,
     click_xpath,
     click_y_esperar_descarga,
     esperar_select_cargado,
@@ -21,8 +25,6 @@ from browser import (
     screenshot,
     seleccionar_periodo_mes_anterior,
     seleccionar_por_texto,
-    subir_archivo,
-    subir_archivos,
 )
 from compilar_asistencias import compilar_asistencias_por_faena
 from config import DOWNLOAD_DIR
@@ -36,7 +38,7 @@ from rellenar_plantilla_asistencias import rellenar_plantilla_asistencias
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
-from xpaths import xp
+from xpaths import candidatos
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +48,12 @@ TIPO_ASISTENCIA = "Libro de Asistencia"
 
 
 def _elegir_tipo_y_periodo(driver, wait, tipo: str) -> str:
-    seleccionar_por_texto(driver, wait, xp("liquidaciones.select_tipo"), tipo)
+    seleccionar_por_texto(driver, wait, xpk(driver, "liquidaciones.select_tipo"), tipo)
     esperar_select_cargado(
-        driver, wait, xp("liquidaciones.select_periodo"), min_opciones=1
+        driver, wait, xpk(driver, "liquidaciones.select_periodo"), min_opciones=1
     )
     periodo_ui = seleccionar_periodo_mes_anterior(
-        driver, wait, xp("liquidaciones.select_periodo")
+        driver, wait, xpk(driver, "liquidaciones.select_periodo")
     )
     time.sleep(1)
     return periodo_ui
@@ -75,7 +77,7 @@ def ejecutar(driver, wait) -> Path:
     plantilla_liq = click_y_esperar_descarga(
         driver,
         wait,
-        xp("liquidaciones.btn_descargar_plantilla"),
+        xpk(driver, "liquidaciones.btn_descargar_plantilla"),
         glob_pat=GLOB_PLANTILLA,
     )
     screenshot(driver, "asist_e2e_liq_descargada.png")
@@ -96,7 +98,7 @@ def ejecutar(driver, wait) -> Path:
     # --- 3. Plantilla Libro de Asistencia ---
     logger.info("[%s] Volviendo a 'Descarga Plantilla Nueva'", NOMBRE)
     try:
-        click_xpath(driver, wait, xp("liquidaciones.ir_a_descargar"))
+        click_xpath(driver, wait, xpk(driver, "liquidaciones.ir_a_descargar"))
         time.sleep(1)
     except Exception as exc:
         logger.warning("[%s] Toggle descarga falló (%s); re-navegando", NOMBRE, exc)
@@ -110,7 +112,7 @@ def ejecutar(driver, wait) -> Path:
     plantilla_asi = click_y_esperar_descarga(
         driver,
         wait,
-        xp("liquidaciones.btn_descargar_plantilla"),
+        xpk(driver, "liquidaciones.btn_descargar_plantilla"),
         glob_pat=GLOB_PLANTILLA,
     )
     screenshot(driver, "asist_e2e_asi_descargada.png")
@@ -138,25 +140,38 @@ def ejecutar(driver, wait) -> Path:
 
     # --- 4. Subir Excel + PDFs ---
     logger.info("[%s] Ir a pantalla de carga", NOMBRE)
-    click_xpath(driver, wait, xp("liquidaciones.ir_a_cargar"))
+    click_xpath(driver, wait, xpk(driver, "liquidaciones.ir_a_cargar"))
     time.sleep(2)
     screenshot(driver, "asist_e2e_pantalla_carga.png")
 
     logger.info("[%s] Subiendo Excel %s", NOMBRE, relleno.plantilla.name)
-    subir_archivo(driver, wait, xp("liquidaciones.input_excel"), relleno.plantilla)
+    enviar_archivos(driver, wait, "liquidaciones.input_excel", [relleno.plantilla])
     time.sleep(1)
-    click_xpath(driver, wait, xp("liquidaciones.btn_enviar_excel"))
+    click_mutante(
+        driver, wait, "liquidaciones.btn_enviar_excel",
+        "click 'Cargar Excel' (sube la plantilla al portal)",
+    )
     logger.info("[%s] Esperando que el portal habilite la zona de PDFs…", NOMBRE)
-    zona_docs = xp("asistencias.zona_upload_documentos")
-    esperar_zona_documentos_habilitada(driver, zona_docs, timeout=180)
+    if dry_run():
+        # La zona solo se habilita tras 'Cargar Excel' (omitido): no exigir el
+        # elemento aquí; enviar_archivos lo verifica tolerando su ausencia.
+        zona_docs = "asistencias.zona_upload_documentos"
+        logger.warning(
+            "[DRY_RUN] se omitiría: esperar habilitación de la zona de documentos "
+            "(solo ocurre tras 'Cargar Excel', que no se ejecutó)"
+        )
+    else:
+        zona_docs = xpk(driver, "asistencias.zona_upload_documentos", visible=False)
+        esperar_zona_documentos_habilitada(driver, zona_docs, timeout=180)
     screenshot(driver, "asist_e2e_excel_procesado.png")
 
     logger.info("[%s] Subiendo %s PDFs uno a uno → %s", NOMBRE, len(relleno.pdfs), zona_docs)
-    subir_archivos(
+    enviar_archivos(
         driver,
         wait,
-        zona_docs,
+        "asistencias.zona_upload_documentos",
         relleno.pdfs,
+        multiples=True,
         esperar=True,
         timeout=900,
         uno_a_uno=True,
@@ -165,7 +180,29 @@ def ejecutar(driver, wait) -> Path:
 
     # --- 5. Validar Documentos ---
     logger.info("[%s] Validar Documentos", NOMBRE)
-    click_xpath(driver, wait, xp("liquidaciones.btn_validar_documentos"))
+    click_mutante(
+        driver, wait, "liquidaciones.btn_validar_documentos",
+        "click 'Validar Documentos' (envía la carga a validación)",
+    )
+    if dry_run():
+        logger.warning(
+            "[DRY_RUN] se omitiría: esperar resultado de validación, "
+            "'Realizar Carga Masiva' y botón post-carga"
+        )
+        click_mutante(
+            driver, wait, "asistencias.btn_realizar_carga_masiva",
+            "click 'Realizar Carga Masiva' (carga definitiva)",
+        )
+        click_mutante(
+            driver, wait, "asistencias.btn_despues_carga_masiva",
+            "click botón post-carga masiva",
+        )
+        screenshot(driver, "asist_e2e_dry_run_fin.png")
+        logger.info(
+            "[%s] DRY_RUN: carga NO enviada | excel=%s | faenas=%s | pdfs=%s | periodo=%s",
+            NOMBRE, relleno.plantilla.name, relleno.filas, len(relleno.pdfs), periodo_gcs,
+        )
+        return relleno.plantilla
     # Esperar resultado 2.3 (plantilla correcta / 0 errores)
     WebDriverWait(driver, 180).until(
         lambda d: "0" in (d.page_source or "")
@@ -179,17 +216,22 @@ def ejecutar(driver, wait) -> Path:
 
     # --- 6. Realizar Carga Masiva ---
     logger.info("[%s] Realizar Carga Masiva", NOMBRE)
-    _esperar_clickable(driver, xp("asistencias.btn_realizar_carga_masiva"), timeout=180)
-    click_xpath(driver, wait, xp("asistencias.btn_realizar_carga_masiva"))
+    _esperar_clickable(
+        driver, xpk(driver, "asistencias.btn_realizar_carga_masiva", timeout=180), timeout=180
+    )
+    click_mutante(
+        driver, wait, "asistencias.btn_realizar_carga_masiva",
+        "click 'Realizar Carga Masiva' (carga definitiva)",
+    )
     time.sleep(3)
     screenshot(driver, "asist_e2e_carga_masiva_click.png")
 
     # --- 7. Esperar fin y botón post (solo cuando ya terminó) ---
     logger.info("[%s] Esperando botón post-carga…", NOMBRE)
-    post = xp("asistencias.btn_despues_carga_masiva")
+    post_cands = candidatos("asistencias.btn_despues_carga_masiva")
     # Alternativas por texto por si cambia el DOM tras la carga
     post_alts = [
-        post,
+        *post_cands,
         "//button[contains(.,'Aceptar') or contains(.,'Continuar') or contains(.,'Finalizar') or contains(.,'Cerrar')]/span",
         "//button[contains(.,'Aceptar') or contains(.,'Continuar') or contains(.,'Finalizar')]",
     ]
